@@ -919,6 +919,7 @@ function renderTerritoryLayer(){
       const audStr=aud?`<div class="taud">👥 ${fmt(aud.pop)} people &nbsp; 🏠 ${fmt(aud.hh)} households</div>`:'';
       l.bindTooltip(`<div class="tn">${salName}</div>${audStr}`,{className:'pc-tooltip',sticky:true});
       l.on('mouseover',()=>{
+        console.log('hover fired', f.properties.sal_name);
         const selStore=sel!==null?stores.find(x=>x.id===sel):null;
         if(selStore?.is_metro){
           const inSel=(selStore.suburbs||[]).includes(salCode);
