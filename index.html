@@ -632,8 +632,12 @@ function resetToOriginal(){
 }
 
 function calcRecommendedBudget(s){
-  const pcs=s.postcodes||[];
-  const hh=pcs.reduce((acc,pc)=>acc+(pcAudience[pc]?.hh||0),0);
+  let hh=0;
+  if(s.is_metro){
+    (s.suburbs||[]).forEach(code=>{ hh+=(salAudience[code]?.hh||0); });
+  } else {
+    (s.postcodes||[]).forEach(pc=>{ hh+=(pcAudience[pc]?.hh||0); });
+  }
   const impressions=hh*PENETRATION*FREQUENCY;
   const budget=(impressions*CPM)/1000;
   return{budget:Math.round(budget),impressions:Math.round(impressions),hh};
