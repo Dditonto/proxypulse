@@ -465,7 +465,8 @@ let useVoronoi=false;
 const PENETRATION=0.40, FREQUENCY=3, CPM=18;
 window._regionalCircles=[];
 window._metroCircleLayer=[];
-let postcodeData=null, pcAudience={}, postcodeLayer=null, labelLayer=null, allSuburbsLayer=null;
+let postcodeData=null, pcAudience={}, postcodeLayer=null, labelLayer=null;
+window.allSuburbsLayer=null;
 let pcToStores={}, conflictPCs=new Set();
 
 map=L.map('map',{zoomControl:true}).setView([-25.5,134],4);
@@ -869,7 +870,7 @@ function pcIntersectsStores(center,storesToCheck){
 function clearLayers(){
   if(postcodeLayer){map.removeLayer(postcodeLayer);postcodeLayer=null;}
   if(labelLayer){map.removeLayer(labelLayer);labelLayer=null;}
-  if(allSuburbsLayer){map.removeLayer(allSuburbsLayer);allSuburbsLayer=null;}
+  if(window.allSuburbsLayer){map.removeLayer(window.allSuburbsLayer);window.allSuburbsLayer=null;}
 }
 
 
@@ -909,8 +910,8 @@ function renderTerritoryLayer(){
 
   // ── METRO: suburb polygon territories ──
   // Layer 1: all 838 suburbs as background — handles hover/click for unassigned suburbs
-  if(allSuburbsLayer){map.removeLayer(allSuburbsLayer);allSuburbsLayer=null;}
-  allSuburbsLayer=L.geoJSON({type:'FeatureCollection',features:postcodeData.features},{
+  if(window.allSuburbsLayer){map.removeLayer(window.allSuburbsLayer);window.allSuburbsLayer=null;}
+  window.allSuburbsLayer=L.geoJSON({type:'FeatureCollection',features:postcodeData.features},{
     style:{color:'white',weight:1,fillColor:'white',fillOpacity:0.01,opacity:0.15},
     onEachFeature:(f,l)=>{
       const salCode=f.properties.sal_code;
