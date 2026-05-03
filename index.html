@@ -873,10 +873,9 @@ function clearLayers(){
 }
 
 function renderSuburbBaseLayer(){
-  // Already visible and zoom still valid — no need to recreate
-  if(suburbBaseLayer&&map.getZoom()>=8) return;
-  if(suburbBaseLayer){map.removeLayer(suburbBaseLayer);suburbBaseLayer=null;}
-  if(!postcodeData||mode!=='territory'||map.getZoom()<8) return;
+  // Already visible — no need to recreate
+  if(suburbBaseLayer) return;
+  if(!postcodeData||mode!=='territory') return;
   suburbBaseLayer=L.geoJSON({type:'FeatureCollection',features:postcodeData.features},{
     style:{color:'rgba(255,255,255,0.2)',weight:0.5,fillColor:'transparent',fillOpacity:0,dashArray:'3,4'},
     onEachFeature:(f,l)=>{
@@ -952,8 +951,7 @@ function renderTerritoryLayer(){
 
   const zoom=map.getZoom();
 
-  // Remove base layer when zoomed out below threshold
-  if(zoom<8&&suburbBaseLayer){map.removeLayer(suburbBaseLayer);suburbBaseLayer=null;}
+
 
   // ── METRO: suburb polygon territories ──
   const features=[];
