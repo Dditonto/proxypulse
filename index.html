@@ -632,15 +632,15 @@ function resetToOriginal(){
 }
 
 function calcRecommendedBudget(s){
-  let hh=0;
+  let pop=0;
   if(s.is_metro){
-    (s.suburbs||[]).forEach(code=>{ hh+=(salAudience[code]?.hh||0); });
+    (s.suburbs||[]).forEach(code=>{ pop+=(salAudience[code]?.pop||0); });
   } else {
-    (s.postcodes||[]).forEach(pc=>{ hh+=(pcAudience[pc]?.hh||0); });
+    (s.postcodes||[]).forEach(pc=>{ pop+=(pcAudience[pc]?.pop||0); });
   }
-  const impressions=hh*PENETRATION*FREQUENCY;
+  const impressions=pop*PENETRATION*FREQUENCY;
   const budget=(impressions*CPM)/1000;
-  return{budget:Math.round(budget),impressions:Math.round(impressions),hh};
+  return{budget:Math.round(budget),impressions:Math.round(impressions),pop};
 }
 
 function toggleBrand(brand){
@@ -1264,11 +1264,11 @@ function buildContext(){
       if(postcodeData) postcodeData.features.forEach(f=>{
         if(!f._center) return;
         const code=f.properties.sal_code;
-        const hh=(salAudience[code]&&salAudience[code].hh)||0;
+        const pop=(salAudience[code]&&salAudience[code].pop)||0;
         out[code]=[
           Math.round(f._center.lat*10000)/10000,
           Math.round(f._center.lng*10000)/10000,
-          hh
+          pop
         ];
       });
       return out;
@@ -1359,18 +1359,18 @@ ${buildContext()}
 • stores[]: id, name, lat, lng, brand, state, is_metro, removed, potential_removal, population, households, recommended_budget, impressions, has_conflict
   – Metro: suburbs:[{code,name}] using SAL suburb polygons
   – Regional: postcodes:[], radius_km using radius circles
-• suburb_centroids{}: sal_code → [lat, lng, households]  (2021 ABS Census, all metro suburbs)
+• suburb_centroids{}: sal_code → [lat, lng, population]  (2021 ABS Census Tot_P_P, all metro suburbs)
 
 ═══ VORONOI ALGORITHM ═══
 Voronoi assigns each suburb to the nearest metro store by straight-line distance:
   dist² = (store.lat − centroid_lat)² + (store.lng − centroid_lng)²
   (no sqrt needed for comparison; Euclidean is accurate enough within a metro area)
 
-To reason about a specific assignment: look up suburb_centroids[code] for [lat,lng,hh], compute dist² to each candidate store, pick minimum.
+To reason about a specific assignment: look up suburb_centroids[code] for [lat,lng,pop], compute dist² to each candidate store, pick minimum.
 
 Budget prediction before applying:
-  predicted_hh = sum of suburb_centroids[code][2] for all suburbs assigned to that store
-  budget = predicted_hh × 0.40 × 3 × 18 / 1000
+  predicted_pop = sum of suburb_centroids[code][2] for all suburbs assigned to that store
+  budget = predicted_pop × 0.40 × 3 × 18 / 1000
 
 When explaining Voronoi decisions, show a sample of 3–5 suburbs with their distances to the winning store vs the nearest competitor, to illustrate why each was assigned.
 
