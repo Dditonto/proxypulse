@@ -465,7 +465,7 @@ let useVoronoi=false;
 const PENETRATION=0.40, FREQUENCY=3, CPM=18;
 window._regionalCircles=[];
 window._metroCircleLayer=[];
-let postcodeData=null, pcAudience={}, postcodeLayer=null, labelLayer=null;
+let postcodeData=null, pcAudience={}, postcodeLayer=null, labelLayer=null, suburbBaseLayer=null;
 let pcToStores={}, conflictPCs=new Set();
 
 map=L.map('map',{zoomControl:true,preferCanvas:true}).setView([-25.5,134],4);
@@ -869,6 +869,55 @@ function pcIntersectsStores(center,storesToCheck){
 function clearLayers(){
   if(postcodeLayer){map.removeLayer(postcodeLayer);postcodeLayer=null;}
   if(labelLayer){map.removeLayer(labelLayer);labelLayer=null;}
+  if(suburbBaseLayer){map.removeLayer(suburbBaseLayer);suburbBaseLayer=null;}
+}
+
+function renderSuburbBaseLayer(){
+  // Already visible and zoom still valid — no need to recreate
+  if(suburbBaseLayer&&map.getZoom()>=8) return;
+  if(suburbBaseLayer){map.removeLayer(suburbBaseLayer);suburbBaseLayer=null;}
+  if(!postcodeData||mode!=='territory'||map.getZoom()<8) return;
+  suburbBaseLayer=L.geoJSON({type:'FeatureCollection',features:postcodeData.features},{
+    style:{color:'rgba(255,255,255,0.2)',weight:0.5,fillColor:'transparent',fillOpacity:0,dashArray:'3,4'},
+    onEachFeature:(f,l)=>{
+      const salCode=f.properties.sal_code;
+      const salName=f.properties.sal_name;
+      const aud=pcAudience[salCode];
+      const audStr=aud?`<div class="taud">👥 ${fmt(aud.pop)} people &nbsp; 🏠 ${fmt(aud.hh)} households</div>`:'';
+      l.bindTooltip(`<div class="tn">${salName}</div>${audStr}`,{className:'pc-tooltip',sticky:true});
+      l.on('mouseover',()=>{
+        const selStore=sel!==null?stores.find(x=>x.id===sel):null;
+        const inSel=selStore?.is_metro&&(selStore.suburbs||[]).includes(salCode);
+        const actionStr=selStore?.is_metro
+          ?(inSel
+            ?`<div style="color:#ff453a;font-size:10px;margin-top:4px">🗑 Click to remove from ${selStore.name}</div>`
+            :`<div style="color:#27ae60;font-size:10px;margin-top:4px">➕ Click to add to ${selStore.name}</div>`)
+          :'';
+        l.setTooltipContent(`<div class="tn">${salName}</div>${audStr}${actionStr}`);
+        l.setStyle({fillColor:'rgba(255,255,255,0.12)',fillOpacity:1,weight:1,color:'rgba(255,255,255,0.5)'});
+      });
+      l.on('mouseout',()=>{
+        l.setStyle({color:'rgba(255,255,255,0.2)',weight:0.5,fillColor:'transparent',fillOpacity:0,dashArray:'3,4'});
+      });
+      l.on('click',()=>{
+        const selStore=sel!==null?stores.find(x=>x.id===sel):null;
+        if(!selStore?.is_metro) return;
+        const idx=(selStore.suburbs||[]).indexOf(salCode);
+        saveUndoState();
+        if(idx>=0){ selStore.suburbs.splice(idx,1); selStore.suburb_names.splice(idx,1); }
+        else { selStore.suburbs.push(salCode); selStore.suburb_names.push(salName); }
+        buildConflictMap();
+        const _aud=calcStoreAudience(selStore);const _rec=calcRecommendedBudget(selStore);
+        document.getElementById('edPop').textContent=fmt(_aud.pop);
+        document.getElementById('edHH').textContent=fmt(_aud.hh);
+        document.getElementById('edPCCount').textContent=selStore.suburbs.length+' suburbs';
+        const _bp=document.getElementById('budgetPanel');
+        if(_bp) _bp.innerHTML='<div class="budget-row"><div><div class="budget-label">Recommended Budget</div><div class="budget-val">$'+_rec.budget.toLocaleString()+'</div><div class="budget-sub">40% penetration · freq 3 · $18 CPM</div></div><div style="text-align:right"><div class="budget-label">Impressions</div><div class="budget-val">'+fmt(_rec.impressions)+'</div><div class="budget-sub">est. impressions</div></div></div>';
+        renderPCEditor(selStore);renderList();updateGlobalStats();
+        setTimeout(()=>{ renderTerritoryLayer(); },300);
+      });
+    }
+  }).addTo(map);
 }
 
 function renderRadiusPostcodes(){
@@ -901,8 +950,10 @@ function renderTerritoryLayer(){
   if(window._metroCircleLayer){window._metroCircleLayer.forEach(c=>map.removeLayer(c));window._metroCircleLayer=[];}
   if(!postcodeData) return;
 
-  const bounds=map.getBounds().pad(0.5);
   const zoom=map.getZoom();
+
+  // Remove base layer when zoomed out below threshold
+  if(zoom<8&&suburbBaseLayer){map.removeLayer(suburbBaseLayer);suburbBaseLayer=null;}
 
   // ── METRO: suburb polygon territories ──
   const features=[];
@@ -917,23 +968,12 @@ function renderTerritoryLayer(){
     });
   });
 
-  // Unassigned suburbs visible in viewport (zoom >= 8)
-  const assignedCodes=new Set(features.map(f=>f.properties.sal_code));
-  if(zoom>=8){
-    postcodeData.features.forEach(f=>{
-      if(!f._center) f._center=getBBoxCenter(f.geometry);
-      if(!f._center) return;
-      if(assignedCodes.has(f.properties.sal_code)) return;
-      const c=f._center;
-      if(c.lat<bounds.getSouth()||c.lat>bounds.getNorth()||c.lng<bounds.getWest()||c.lng>bounds.getEast()) return;
-      features.push({...f,_assigned:false});
-    });
-  }
+  // Ensure the always-on base layer (all 838 suburbs) is present below the territory layer
+  renderSuburbBaseLayer();
 
   if(features.length){
     postcodeLayer=L.geoJSON({type:'FeatureCollection',features},{
       style:(f)=>{
-        if(!f._assigned) return{color:'rgba(255,255,255,0.15)',weight:0.5,fillColor:'rgba(255,255,255,0.03)',fillOpacity:1,dashArray:'3,4'};
         const isSel=sel!==null&&f._storeId===sel;
         const hasSelection=sel!==null;
         if(isSel) return{color:'#ffffff',weight:3,fillColor:f._color,fillOpacity:0.85};
