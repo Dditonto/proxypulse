@@ -465,7 +465,7 @@ let useVoronoi=false;
 const PENETRATION=0.40, FREQUENCY=3, CPM=18;
 window._regionalCircles=[];
 window._metroCircleLayer=[];
-let postcodeData=null, pcAudience={}, postcodeLayer=null, labelLayer=null;
+let postcodeData=null, pcAudience={}, postcodeLayer=null, labelLayer=null, allSuburbsLayer=null;
 let pcToStores={}, conflictPCs=new Set();
 
 map=L.map('map',{zoomControl:true,preferCanvas:true}).setView([-25.5,134],4);
@@ -869,6 +869,7 @@ function pcIntersectsStores(center,storesToCheck){
 function clearLayers(){
   if(postcodeLayer){map.removeLayer(postcodeLayer);postcodeLayer=null;}
   if(labelLayer){map.removeLayer(labelLayer);labelLayer=null;}
+  if(allSuburbsLayer){map.removeLayer(allSuburbsLayer);allSuburbsLayer=null;}
 }
 
 
@@ -907,24 +908,68 @@ function renderTerritoryLayer(){
 
 
   // ── METRO: suburb polygon territories ──
-  const assignedMap={};
+  // Layer 1: all 838 suburbs as background — handles hover/click for unassigned suburbs
+  if(allSuburbsLayer){map.removeLayer(allSuburbsLayer);allSuburbsLayer=null;}
+  allSuburbsLayer=L.geoJSON({type:'FeatureCollection',features:postcodeData.features},{
+    style:{color:'white',weight:0.5,fillColor:'transparent',fillOpacity:0,opacity:0.15},
+    onEachFeature:(f,l)=>{
+      const salCode=f.properties.sal_code;
+      const salName=f.properties.sal_name;
+      const aud=pcAudience[salCode];
+      const audStr=aud?`<div class="taud">👥 ${fmt(aud.pop)} people &nbsp; 🏠 ${fmt(aud.hh)} households</div>`:'';
+      l.bindTooltip(`<div class="tn">${salName}</div>${audStr}`,{className:'pc-tooltip',sticky:true});
+      l.on('mouseover',()=>{
+        const selStore=sel!==null?stores.find(x=>x.id===sel):null;
+        if(selStore?.is_metro){
+          const inSel=(selStore.suburbs||[]).includes(salCode);
+          const actionStr=inSel
+            ?`<div style="color:#ff453a;font-size:10px;margin-top:4px">🗑 Click to remove from ${selStore.name}</div>`
+            :`<div style="color:#27ae60;font-size:10px;margin-top:4px">➕ Click to add to ${selStore.name}</div>`;
+          l.setTooltipContent(`<div class="tn">${salName}</div>${audStr}${actionStr}`);
+          if(inSel) l.setStyle({fillColor:selStore.color,fillOpacity:0.95,weight:3.5,color:'#ffffff',opacity:1});
+          else l.setStyle({fillColor:'rgba(255,255,255,0.18)',fillOpacity:1,weight:1.5,color:'rgba(255,255,255,0.5)',opacity:1});
+        } else {
+          l.setStyle({fillColor:'rgba(255,255,255,0.08)',fillOpacity:1,weight:1,color:'rgba(255,255,255,0.4)',opacity:1});
+        }
+      });
+      l.on('mouseout',()=>{
+        l.setStyle({color:'white',weight:0.5,fillColor:'transparent',fillOpacity:0,opacity:0.15});
+      });
+      l.on('click',()=>{
+        const selStore=sel!==null?stores.find(x=>x.id===sel):null;
+        if(!selStore?.is_metro) return;
+        const idx=(selStore.suburbs||[]).indexOf(salCode);
+        saveUndoState();
+        if(idx>=0){ selStore.suburbs.splice(idx,1); selStore.suburb_names.splice(idx,1); }
+        else { selStore.suburbs.push(salCode); selStore.suburb_names.push(salName); }
+        buildConflictMap();
+        const _aud=calcStoreAudience(selStore);const _rec=calcRecommendedBudget(selStore);
+        document.getElementById('edPop').textContent=fmt(_aud.pop);
+        document.getElementById('edHH').textContent=fmt(_aud.hh);
+        document.getElementById('edPCCount').textContent=selStore.suburbs.length+' suburbs';
+        const _bp=document.getElementById('budgetPanel');
+        if(_bp) _bp.innerHTML='<div class="budget-row"><div><div class="budget-label">Recommended Budget</div><div class="budget-val">$'+_rec.budget.toLocaleString()+'</div><div class="budget-sub">40% penetration · freq 3 · $18 CPM</div></div><div style="text-align:right"><div class="budget-label">Impressions</div><div class="budget-val">'+fmt(_rec.impressions)+'</div><div class="budget-sub">est. impressions</div></div></div>';
+        renderPCEditor(selStore);renderList();updateGlobalStats();
+        setTimeout(()=>{ renderTerritoryLayer(); },300);
+      });
+    }
+  }).addTo(map);
+
+  // Layer 2: assigned suburbs only — colored on top, gets event priority over allSuburbsLayer
+  const features=[];
   stores.forEach(s=>{
     if(!activeBrands.has(s.brand)||!s.is_metro) return;
     (s.suburbs||[]).forEach((code,i)=>{
-      assignedMap[code]={storeId:s.id,color:s.color,storeName:s.name,suburbName:s.suburb_names[i]||code};
+      const f=window.suburbFeatureMap[code];
+      if(!f) return;
+      if(!f._center) f._center=getBBoxCenter(f.geometry);
+      if(!f._center) return;
+      features.push({...f,_storeId:s.id,_color:s.color,_isConflict:conflictPCs.has(code),_storeName:s.name,_suburbName:s.suburb_names[i]||code,_assigned:true});
     });
   });
-  const features=postcodeData.features.map(f=>{
-    if(!f._center) f._center=getBBoxCenter(f.geometry);
-    const code=f.properties.sal_code;
-    const a=assignedMap[code];
-    if(a) return{...f,_storeId:a.storeId,_color:a.color,_isConflict:conflictPCs.has(code),_storeName:a.storeName,_suburbName:a.suburbName,_assigned:true};
-    return{...f,_assigned:false};
-  });
-  {
+  if(features.length){
     postcodeLayer=L.geoJSON({type:'FeatureCollection',features},{
       style:(f)=>{
-        if(!f._assigned) return{color:'rgba(255,255,255,0.15)',weight:0.5,fillColor:'transparent',fillOpacity:0,dashArray:'3,4'};
         const isSel=sel!==null&&f._storeId===sel;
         const hasSelection=sel!==null;
         if(isSel) return{color:'#ffffff',weight:3,fillColor:f._color,fillOpacity:0.85};
@@ -937,10 +982,8 @@ function renderTerritoryLayer(){
         const salName=f.properties.sal_name;
         const aud=pcAudience[salCode];
         const audStr=aud?`<div class="taud">👥 ${fmt(aud.pop)} people &nbsp; 🏠 ${fmt(aud.hh)} households</div>`:'';
-        const others=f._assigned?(pcToStores[salCode]||[]).filter(id=>id!==f._storeId).map(id=>stores.find(x=>x.id===id)?.name).filter(Boolean):[];
-        const baseTooltip=f._assigned
-          ?`<div class="tn">${suburbName}</div><div class="tm">${f._storeName}</div>${audStr}${others.length?`<div style="color:#ff8a80;font-size:10px;margin-top:2px">Also: ${others.slice(0,2).join(', ')}${others.length>2?' +more':''}</div>`:''}`
-          :`<div class="tn">${suburbName||salName}</div>${audStr}`;
+        const others=(pcToStores[salCode]||[]).filter(id=>id!==f._storeId).map(id=>stores.find(x=>x.id===id)?.name).filter(Boolean);
+        const baseTooltip=`<div class="tn">${suburbName}</div><div class="tm">${f._storeName}</div>${audStr}${others.length?`<div style="color:#ff8a80;font-size:10px;margin-top:2px">Also: ${others.slice(0,2).join(', ')}${others.length>2?' +more':''}</div>`:''}`;
         l.bindTooltip(baseTooltip,{className:'pc-tooltip',sticky:true});
         l.on('mouseover',()=>{
           const selStore=sel!==null?stores.find(x=>x.id===sel):null;
@@ -950,26 +993,20 @@ function renderTerritoryLayer(){
               ?`<div style="color:#ff453a;font-size:10px;margin-top:4px">🗑 Click to remove from ${selStore.name}</div>`
               :`<div style="color:#27ae60;font-size:10px;margin-top:4px">➕ Click to add to ${selStore.name}</div>`;
             l.setTooltipContent(`<div class="tn">${suburbName||salName}</div>${audStr}${actionStr}`);
-            if(inSel) l.setStyle({fillOpacity:0.95,weight:3.5,fillColor:f._color||'#ffffff',color:'#ffffff'});
+            if(inSel) l.setStyle({fillOpacity:0.95,weight:3.5,fillColor:f._color,color:'#ffffff'});
             else l.setStyle({fillColor:'rgba(255,255,255,0.18)',fillOpacity:1,weight:1.5,color:'rgba(255,255,255,0.5)'});
-          } else if(f._assigned){
+          } else {
             const isSel=sel!==null&&f._storeId===sel;const hasSelection=sel!==null;
             if(isSel) l.setStyle({fillOpacity:0.88,weight:3});
             else if(hasSelection) l.setStyle({fillOpacity:0.25,weight:1.5,fillColor:f._color});
             else l.setStyle({fillOpacity:0.45,weight:1.5});
-          } else {
-            l.setStyle({fillColor:'rgba(255,255,255,0.18)',fillOpacity:1,weight:1.5,color:'rgba(255,255,255,0.5)'});
           }
         });
         l.on('mouseout',()=>{
-          if(!f._assigned){
-            l.setStyle({color:'rgba(255,255,255,0.15)',weight:0.5,fillColor:'transparent',fillOpacity:0,dashArray:'3,4'});
-          } else {
-            const isSel=sel!==null&&f._storeId===sel;const hasSelection=sel!==null;
-            if(isSel) l.setStyle({fillOpacity:0.85,weight:3,fillColor:f._color,color:'#ffffff'});
-            else if(hasSelection) l.setStyle({fillOpacity:0.08,weight:0.5,fillColor:f._color,color:'rgba(255,255,255,0.12)'});
-            else l.setStyle({fillOpacity:0.22,weight:0.8,fillColor:f._color,color:'rgba(255,255,255,0.18)'});
-          }
+          const isSel=sel!==null&&f._storeId===sel;const hasSelection=sel!==null;
+          if(isSel) l.setStyle({fillOpacity:0.85,weight:3,fillColor:f._color,color:'#ffffff'});
+          else if(hasSelection) l.setStyle({fillOpacity:0.08,weight:0.5,fillColor:f._color,color:'rgba(255,255,255,0.12)'});
+          else l.setStyle({fillOpacity:0.22,weight:0.8,fillColor:f._color,color:'rgba(255,255,255,0.18)'});
         });
         l.on('click',()=>{
           const selStore=sel!==null?stores.find(x=>x.id===sel):null;
@@ -987,7 +1024,7 @@ function renderTerritoryLayer(){
             if(_bp) _bp.innerHTML='<div class="budget-row"><div><div class="budget-label">Recommended Budget</div><div class="budget-val">$'+_rec.budget.toLocaleString()+'</div><div class="budget-sub">40% penetration · freq 3 · $18 CPM</div></div><div style="text-align:right"><div class="budget-label">Impressions</div><div class="budget-val">'+fmt(_rec.impressions)+'</div><div class="budget-sub">est. impressions</div></div></div>';
             renderPCEditor(selStore);renderList();updateGlobalStats();
             setTimeout(()=>{ renderTerritoryLayer(); },300);
-          } else if(f._assigned){
+          } else {
             pick(f._storeId);
           }
         });
