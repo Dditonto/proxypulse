@@ -911,7 +911,7 @@ function renderTerritoryLayer(){
   // Layer 1: all 838 suburbs as background — handles hover/click for unassigned suburbs
   if(allSuburbsLayer){map.removeLayer(allSuburbsLayer);allSuburbsLayer=null;}
   allSuburbsLayer=L.geoJSON({type:'FeatureCollection',features:postcodeData.features},{
-    style:{color:'white',weight:0.5,fillColor:'transparent',fillOpacity:0,opacity:0.15},
+    style:{color:'white',weight:1,fillColor:'white',fillOpacity:0.01,opacity:0.15},
     onEachFeature:(f,l)=>{
       const salCode=f.properties.sal_code;
       const salName=f.properties.sal_name;
@@ -934,7 +934,7 @@ function renderTerritoryLayer(){
         }
       });
       l.on('mouseout',()=>{
-        l.setStyle({color:'white',weight:0.5,fillColor:'transparent',fillOpacity:0,opacity:0.15});
+        l.setStyle({color:'white',weight:1,fillColor:'white',fillOpacity:0.01,opacity:0.15});
       });
       l.on('click',()=>{
         const selStore=sel!==null?stores.find(x=>x.id===sel):null;
