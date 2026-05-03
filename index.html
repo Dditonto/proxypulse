@@ -1084,58 +1084,49 @@ function sendSuggestion(text){
 }
 
 function buildContext(){
-  // Build a concise context of current state for the agent
-  const metroStores = stores.filter(s=>s.is_metro&&activeBrands.has(s.brand));
-  const regionalStores = stores.filter(s=>!s.is_metro&&activeBrands.has(s.brand));
-  const conflicts = stores.filter(s=>s.is_metro&&(s.postcodes||[]).some(pc=>conflictPCs.has(pc)));
-
-  // Current selected store
-  const selStore = sel !== null ? stores.find(x=>x.id===sel) : null;
-
-  const ctx = {
-    summary: {
-      total_stores: stores.filter(s=>activeBrands.has(s.brand)).length,
-      metro_stores: metroStores.length,
-      regional_stores: regionalStores.length,
-      conflict_count: conflicts.length,
-      conflicting_postcodes: conflictPCs.size,
-      active_brands: [...activeBrands]
-    },
-    selected_store: selStore ? {
-      name: selStore.name,
-      suburb: selStore.suburb,
-      state: selStore.state,
-      brand: selStore.brand,
-      is_metro: selStore.is_metro,
-      radius: selStore.radius,
-      postcodes: selStore.postcodes,
-      postcode_count: (selStore.postcodes||[]).length,
-      population: (selStore.postcodes||[]).reduce((a,pc)=>a+(pcAudience[pc]?.pop||0),0),
-      households: (selStore.postcodes||[]).reduce((a,pc)=>a+(pcAudience[pc]?.hh||0),0)
-    } : null,
-    conflicts: conflicts.slice(0,20).map(s=>({
-      name: s.name,
-      suburb: s.suburb,
-      state: s.state,
-      conflicting_postcodes: (s.postcodes||[]).filter(pc=>conflictPCs.has(pc))
-    })),
-    // Only send stores that are relevant - conflicts + selected store's neighbours
-    // This keeps token count low
-    all_stores: stores.filter(s=>activeBrands.has(s.brand)).map(s=>({
+  buildConflictMap();
+  const active = stores.filter(s=>activeBrands.has(s.brand)&&!s.removed);
+  const storeList = active.map(s=>{
+    const aud = calcStoreAudience(s);
+    const rec = calcRecommendedBudget(s);
+    const conflictItems = s.is_metro
+      ? (s.suburbs||[]).filter(c=>conflictPCs.has(c))
+      : (s.postcodes||[]).filter(pc=>conflictPCs.has(pc));
+    const base = {
       id: s.id,
       name: s.name,
-      suburb: s.suburb,
-      state: s.state,
+      lat: s.lat,
+      lng: s.lng,
       brand: s.brand,
+      state: s.state,
       is_metro: s.is_metro,
-      radius: s.radius,
-      postcode_count: (s.postcodes||[]).length,
-      postcodes: s.postcodes||[],
-      population: (s.postcodes||[]).reduce((a,pc)=>a+(pcAudience[pc]?.pop||0),0),
-      has_conflict: s.is_metro&&(s.postcodes||[]).some(pc=>conflictPCs.has(pc))
-    }))
-  };
-  return JSON.stringify(ctx);
+      population: aud.pop,
+      households: aud.hh,
+      recommended_budget: rec.budget,
+      impressions: rec.impressions,
+      has_conflict: conflictItems.length > 0
+    };
+    if(s.is_metro){
+      base.suburbs = (s.suburbs||[]).map((code,i)=>({code, name:(s.suburb_names||[])[i]||code}));
+      if(conflictItems.length) base.conflicting_suburbs = conflictItems;
+    } else {
+      base.postcodes = s.postcodes||[];
+      base.radius_km = s.radius;
+      if(conflictItems.length) base.conflicting_postcodes = conflictItems;
+    }
+    return base;
+  });
+  return JSON.stringify({
+    summary: {
+      total_active: active.length,
+      metro: active.filter(s=>s.is_metro).length,
+      regional: active.filter(s=>!s.is_metro).length,
+      stores_with_conflicts: storeList.filter(s=>s.has_conflict).length,
+      active_brands: [...activeBrands]
+    },
+    selected_store_id: sel,
+    stores: storeList
+  });
 }
 
 function addMessage(role, text, isThinking=false){
@@ -1173,24 +1164,39 @@ async function sendMessage(){
   try {
     const systemPrompt = `You are an expert territory planning agent for ProxyPulse, an Australian franchise marketing platform. You help plan and optimise local area marketing territories for franchise networks.
 
-You have full access to the current territory data. Here is the current state:
-
+Current territory snapshot (updated each message):
 ${buildContext()}
 
-CAPABILITIES:
-- You can analyse territories, identify issues, and make recommendations
-- When you want to make changes to a store's postcodes, output a JSON action block at the END of your response in this exact format:
-<action>{"type":"update_postcodes","store_id":123,"postcodes":["3000","3001","3002"],"reason":"Removed postcodes across water"}</action>
-- For multiple store updates: <action>{"type":"batch_update","updates":[{"store_id":1,"postcodes":["3000"]},{"store_id":2,"postcodes":["3001"]}],"reason":"Fixed conflicts"}</action>
+DATA NOTES:
+- Metro stores use SAL suburb polygons; each suburb has a "code" (5-digit SAL code) and "name"
+- Regional stores use radius circles around their lat/lng
+- Budget formula: households × 0.40 × 3 × $18 CPM / 1000
+- Population and household figures come from 2021 ABS Census (SAL level for metro, postcode for regional)
+- Conflict = same suburb/postcode assigned to two or more stores of the same brand
+
+ACTIONS — output exactly ONE <action>…</action> block at the very END of your response when making changes (never mid-response, never more than one block):
+
+Add suburbs to a metro store:
+<action>{"type":"add_suburbs","store_id":42,"suburbs":[{"code":"20001","name":"Abbotsford"},{"code":"20002","name":"Collingwood"}],"reason":"Expanding northern coverage"}</action>
+
+Remove suburbs from a metro store:
+<action>{"type":"remove_suburbs","store_id":42,"codes":["20001","20002"],"reason":"Reassigning to neighbouring store"}</action>
+
+Replace all suburbs for a metro store:
+<action>{"type":"update_suburbs","store_id":42,"suburbs":[{"code":"20001","name":"Abbotsford"}],"reason":"Rebuilt territory"}</action>
+
+Update postcodes for a regional store:
+<action>{"type":"update_postcodes","store_id":7,"postcodes":["3000","3001"],"reason":"Fixed cross-water postcodes"}</action>
+
+Batch updates (mix of metro and regional stores):
+<action>{"type":"batch_update","updates":[{"store_id":1,"suburbs":[{"code":"20001","name":"Abbotsford"}]},{"store_id":2,"postcodes":["3000","3001"]}],"reason":"Resolved overlaps"}</action>
 
 RULES:
-- Be concise and direct - this is a professional tool
-- When fixing geographic issues, remove postcodes that are clearly wrong (across water, wrong state, impossibly far)
-- Postcodes are 4-digit Australian codes
-- Metro stores use postcode polygons, regional stores use radius circles
-- Always explain what you changed and why
-- Keep responses under 200 words unless showing data tables
-- Australian geography knowledge: be aware of water bodies like Port Phillip Bay, Gulf St Vincent, Sydney Harbour, Moreton Bay etc.`;
+- Be concise and direct — professional tool, keep responses under 200 words unless showing a data table
+- Only use suburb codes that appear in the stores data already; never invent codes
+- When resolving conflicts, reassign the contested suburb to whichever store is geographically closest
+- Always state what changed and why
+- Australian geography: be aware of Port Phillip Bay, Gulf St Vincent, Sydney Harbour, Moreton Bay etc.`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -1262,47 +1268,75 @@ RULES:
 
 function applyAgentAction(actionJson){
   try {
-    console.log('Applying action:', actionJson);
     if(!actionJson){ addMessage('agent', '⚠ No action data found.'); return; }
     const action = JSON.parse(actionJson);
-    console.log('Parsed action:', action);
     saveUndoState();
 
-    if(action.type === 'update_postcodes'){
-      // Match by id or by name
-      const s = stores.find(x=>x.id===action.store_id) || 
-                stores.find(x=>x.name===action.store_name) ||
-                stores.find(x=>x.name&&action.store_name&&x.name.toLowerCase().includes(action.store_name.toLowerCase()));
-      if(s){
-        s.postcodes = action.postcodes;
-        addMessage('agent', '✓ Updated ' + s.name + ' — now has ' + action.postcodes.length + ' postcodes.');
-        sel = s.id;
-        // Zoom to store
-        setTimeout(()=>{ pick(s.id); }, 200);
-      } else {
-        addMessage('agent', '⚠ Could not find store with id ' + action.store_id + '. Try again with the store name.');
-      }
+    function findStore(id, name){
+      return stores.find(x=>x.id===id) ||
+             stores.find(x=>x.name===name) ||
+             (name ? stores.find(x=>x.name&&x.name.toLowerCase().includes(name.toLowerCase())) : null);
+    }
+
+    function applySuburbsToStore(s, suburbs){
+      s.suburbs = suburbs.map(x=>x.code);
+      s.suburb_names = suburbs.map(x=>x.name||x.code);
+    }
+
+    if(action.type === 'add_suburbs'){
+      const s = findStore(action.store_id, action.store_name);
+      if(!s){ addMessage('agent', '⚠ Store not found: '+action.store_id); return; }
+      const existing = new Set(s.suburbs||[]);
+      (action.suburbs||[]).forEach(sub=>{
+        if(!existing.has(sub.code)){
+          (s.suburbs=s.suburbs||[]).push(sub.code);
+          (s.suburb_names=s.suburb_names||[]).push(sub.name||sub.code);
+          existing.add(sub.code);
+        }
+      });
+      addMessage('agent', '✓ '+s.name+' — added '+action.suburbs.length+' suburb(s), now '+s.suburbs.length+' total.');
+      sel = s.id;
+
+    } else if(action.type === 'remove_suburbs'){
+      const s = findStore(action.store_id, action.store_name);
+      if(!s){ addMessage('agent', '⚠ Store not found: '+action.store_id); return; }
+      const remove = new Set(action.codes||[]);
+      const kept = (s.suburbs||[]).reduce((acc,code,i)=>{ if(!remove.has(code)) acc.push(i); return acc; },[]);
+      s.suburbs = kept.map(i=>s.suburbs[i]);
+      s.suburb_names = kept.map(i=>(s.suburb_names||[])[i]||s.suburbs[kept.indexOf(i)]);
+      addMessage('agent', '✓ '+s.name+' — removed '+remove.size+' suburb(s), now '+s.suburbs.length+' total.');
+      sel = s.id;
+
+    } else if(action.type === 'update_suburbs'){
+      const s = findStore(action.store_id, action.store_name);
+      if(!s){ addMessage('agent', '⚠ Store not found: '+action.store_id); return; }
+      applySuburbsToStore(s, action.suburbs||[]);
+      addMessage('agent', '✓ '+s.name+' — territory set to '+(action.suburbs||[]).length+' suburb(s).');
+      sel = s.id;
+
+    } else if(action.type === 'update_postcodes'){
+      const s = findStore(action.store_id, action.store_name);
+      if(!s){ addMessage('agent', '⚠ Store not found: '+action.store_id); return; }
+      s.postcodes = action.postcodes||[];
+      addMessage('agent', '✓ '+s.name+' — now has '+s.postcodes.length+' postcodes.');
+      sel = s.id;
+
     } else if(action.type === 'batch_update'){
       let count = 0;
-      action.updates.forEach(u=>{
-        const s = stores.find(x=>x.id===u.store_id) ||
-                  stores.find(x=>x.name===u.store_name);
-        if(s){ s.postcodes = u.postcodes; count++; }
+      (action.updates||[]).forEach(u=>{
+        const s = findStore(u.store_id, u.store_name);
+        if(!s) return;
+        if(u.suburbs !== undefined){ applySuburbsToStore(s, u.suburbs); count++; }
+        else if(u.postcodes !== undefined){ s.postcodes = u.postcodes; count++; }
       });
-      addMessage('agent', '✓ Updated ' + count + ' stores.');
+      addMessage('agent', '✓ Updated '+count+' store(s).');
     }
 
     buildConflictMap();
     renderList();
     updateGlobalStats();
-    if(sel!==null){
-      const s=stores.find(x=>x.id===sel);
-      if(s) updatePanelForStore(s);
-    }
-    setTimeout(()=>renderTerritoryLayer(), 150);
-
-    // Remove the action buttons
     document.querySelectorAll('.msg-action-btn').forEach(b=>b.parentElement.remove());
+    setTimeout(()=>{ renderTerritoryLayer(); if(sel!==null) showEditor(sel); }, 150);
 
   } catch(e){
     addMessage('agent', '⚠ Could not apply changes: ' + e.message);
