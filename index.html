@@ -1163,6 +1163,54 @@ function runSanityCheck(thresholdKm=50){
   };
 }
 
+function runRadiusConflictCheck(){
+  const regionalStores = stores.filter(s=>!s.is_metro&&!s.removed);
+  if(!regionalStores.length) return {report:[], action:null};
+
+  const report=[], batchUpdates=[];
+
+  stores.forEach(ms=>{
+    if(!ms.is_metro||ms.removed||!(ms.suburbs&&ms.suburbs.length)) return;
+    const flagged=[], keptSuburbs=[];
+
+    ms.suburbs.forEach((code,i)=>{
+      const f=window.suburbFeatureMap&&window.suburbFeatureMap[code];
+      const c=f&&f._center;
+      const name=(ms.suburb_names||[])[i]||code;
+      if(!c){ keptSuburbs.push({code,name}); return; }
+
+      // Check if this suburb centroid falls inside any regional store's radius
+      let overlappingStore=null;
+      for(const rs of regionalStores){
+        const radiusKm=rs.metro_radius||rs.radius||0;
+        if(!radiusKm) continue;
+        const dist=haversineKm(c.lat,c.lng,rs.lat,rs.lng);
+        if(dist<=radiusKm){ overlappingStore={store:rs,dist_km:Math.round(dist),radius_km:radiusKm}; break; }
+      }
+
+      if(overlappingStore){
+        flagged.push({code,name,
+          regional_store:overlappingStore.store.name,
+          dist_km:overlappingStore.dist_km,
+          radius_km:overlappingStore.radius_km});
+      } else {
+        keptSuburbs.push({code,name});
+      }
+    });
+
+    if(flagged.length){
+      report.push({store_id:ms.id,store_name:ms.name,flagged});
+      batchUpdates.push({store_id:ms.id,suburbs:keptSuburbs});
+    }
+  });
+
+  if(!batchUpdates.length) return {report:[], action:null};
+  return {
+    report,
+    action:{type:'batch_update',updates:batchUpdates,reason:'Radius conflict check: removed suburbs overlapping regional store radii'}
+  };
+}
+
 function buildContext(){
   buildConflictMap();
   const visible = stores.filter(s=>activeBrands.has(s.brand));
@@ -1237,7 +1285,7 @@ function addMessage(role, text, isThinking=false){
   return el;
 }
 
-const ACTION_TYPES = ['batch_update','add_suburbs','remove_suburbs','update_suburbs','update_postcodes','run_voronoi','run_sanity_check'];
+const ACTION_TYPES = ['batch_update','add_suburbs','remove_suburbs','update_suburbs','update_postcodes','run_voronoi','run_sanity_check','run_radius_conflict_check'];
 
 function extractActionJson(text){
   // 1. Explicit <action> tag
@@ -1342,6 +1390,9 @@ Sanity check — remove any suburb more than N km from its store (default 50km).
 <action>{"type":"run_sanity_check","reason":"Remove geographically impossible suburb assignments"}</action>
 <action>{"type":"run_sanity_check","threshold_km":30,"reason":"Tighter 30km sanity check"}</action>
 
+Radius conflict check — remove any metro suburb whose centroid falls inside a regional store's radius circle. Use this to resolve metro/regional overlaps — never do it manually:
+<action>{"type":"run_radius_conflict_check","reason":"Remove metro suburbs that fall inside a regional store's radius"}</action>
+
 Manual suburb edits (use for targeted changes after Voronoi):
 <action>{"type":"add_suburbs","store_id":42,"suburbs":[{"code":"20001","name":"Abbotsford"}],"reason":"..."}</action>
 <action>{"type":"remove_suburbs","store_id":42,"codes":["20001","20002"],"reason":"..."}</action>
@@ -1355,6 +1406,7 @@ Manual suburb edits (use for targeted changes after Voronoi):
 - When resolving conflicts, reassign the contested suburb to the store with smaller dist²
 - Always state what changed, why, and the predicted budget impact
 - To clean up bad assignments use run_sanity_check — never try to enumerate distances manually for large stores
+- To resolve metro/regional radius overlaps use run_radius_conflict_check — never do it manually
 - Australian geography: Port Phillip Bay, Gulf St Vincent, Sydney Harbour, Moreton Bay etc.`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1528,6 +1580,24 @@ function applyAgentAction(actionJson){
         applySuburbsToStore(s,u.suburbs);
       });
       addMessage('agent','✓ Sanity check complete — removed '+totalFlagged+' suburb(s) across '+report.length+' store(s):\n'+summary);
+      if(report.length) sel=report[0].store_id;
+
+    } else if(action.type === 'run_radius_conflict_check'){
+      const {report,action:batchAction}=runRadiusConflictCheck();
+      if(!batchAction){
+        addMessage('agent','✓ Radius conflict check passed — no metro suburbs overlap any regional store radius.');
+        return;
+      }
+      const totalFlagged=report.reduce((a,r)=>a+r.flagged.length,0);
+      const summary=report.map(r=>
+        r.store_name+': '+r.flagged.map(f=>f.name+' (inside '+f.regional_store+' '+f.radius_km+'km radius, '+f.dist_km+'km away)').join(', ')
+      ).join('\n');
+      batchAction.updates.forEach(u=>{
+        const s=findStore(u.store_id,null);
+        if(!s) return;
+        applySuburbsToStore(s,u.suburbs);
+      });
+      addMessage('agent','✓ Radius conflict check — removed '+totalFlagged+' suburb(s) across '+report.length+' metro store(s):\n'+summary);
       if(report.length) sel=report[0].store_id;
     }
 
