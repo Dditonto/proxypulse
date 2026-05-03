@@ -804,8 +804,8 @@ function removePC(storeId, key, type){
     s.postcodes=s.postcodes.filter(p=>p!==key);
   }
   buildConflictMap();
-  updateEditor(s);renderList();updateGlobalStats();
-  setTimeout(()=>{ renderTerritoryLayer(); },300);
+  renderList();updateGlobalStats();
+  setTimeout(()=>{ renderTerritoryLayer(); if(sel!==null) showEditor(sel); },300);
 }
 
 function redraw(){
@@ -956,8 +956,8 @@ function renderTerritoryLayer(){
         if(idx>=0){ selStore.suburbs.splice(idx,1); selStore.suburb_names.splice(idx,1); }
         else { selStore.suburbs.push(salCode); selStore.suburb_names.push(salName); }
         buildConflictMap();
-        updateEditor(selStore);renderList();updateGlobalStats();
-        setTimeout(()=>{ renderTerritoryLayer(); },300);
+        renderList();updateGlobalStats();
+        setTimeout(()=>{ renderTerritoryLayer(); if(sel!==null) showEditor(sel); },300);
       });
     }
   }).addTo(map);
