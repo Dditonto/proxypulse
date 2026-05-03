@@ -498,7 +498,8 @@ Promise.all([Promise.resolve(STORES_DATA),fetch("suburbs.geojson").then(r=>r.jso
     suburbs:[...(s.suburbs||[])],
     suburbs_original:[...(s.suburbs||[])],
     suburb_names:[...(s.suburb_names||[])],
-    radius_original:s.radius
+    radius_original:s.radius,
+    meta_tier: parseInt(s.tier)||null
   }));
   buildConflictMap();
   document.getElementById('fname').textContent=`Mitre 10 — ${stores.length} stores`;
@@ -641,6 +642,17 @@ function calcRecommendedBudget(s){
   const impressions=pop*PENETRATION*FREQUENCY;
   const budget=(impressions*CPM)/1000;
   return{budget:Math.round(budget),impressions:Math.round(impressions),pop};
+}
+
+function calcTierTarget(tier){
+  const T={
+    1:{budget:60,   pop:2778,  min:2222,  max:3333},
+    2:{budget:120,  pop:5556,  min:4444,  max:6667},
+    3:{budget:280,  pop:12963, min:10370, max:15556},
+    4:{budget:800,  pop:37037, min:29630, max:44444},
+    5:{budget:1600, pop:74074, min:59259, max:88889}
+  };
+  return T[tier]||{budget:0,pop:0,min:0,max:Infinity};
 }
 
 function toggleBrand(brand){
@@ -1211,6 +1223,88 @@ function runRadiusConflictCheck(){
   };
 }
 
+function runTierMatch(options={}){
+  const targetStores=stores.filter(s=>{
+    if(!s.is_metro||s.removed||!s.meta_tier) return false;
+    if(options.store_id!==undefined && s.id!==options.store_id) return false;
+    if(options.brand && s.brand!==options.brand) return false;
+    if(options.state && s.state.toUpperCase()!==options.state.toUpperCase()) return false;
+    return true;
+  });
+
+  const report=[], batchUpdates=[];
+
+  targetStores.forEach(s=>{
+    const {pop:target,min,max}=calcTierTarget(s.meta_tier);
+    const currentPop=calcStoreAudience(s).pop;
+
+    if(currentPop>=min && currentPop<=max){
+      report.push({store_id:s.id,store_name:s.name,tier:s.meta_tier,
+        current_pop:currentPop,target,status:'in_band'});
+      return;
+    }
+
+    let newCodes=[...(s.suburbs||[])];
+    let newNames=[...(s.suburb_names||[])];
+
+    if(currentPop<min){
+      // Expand: add nearest unassigned suburbs until in band
+      const assigned=new Set(newCodes);
+      const candidates=[];
+      (postcodeData&&postcodeData.features||[]).forEach(f=>{
+        const code=f.properties.sal_code;
+        if(assigned.has(code)) return;
+        const c=f._center; if(!c) return;
+        const d=(s.lat-c.lat)**2+(s.lng-c.lng)**2;
+        candidates.push({code,name:f.properties.sal_name||code,d,
+          pop:(salAudience[code]&&salAudience[code].pop)||0});
+      });
+      candidates.sort((a,b)=>a.d-b.d);
+      let running=currentPop;
+      for(const sub of candidates){
+        if(running>=min) break;
+        newCodes.push(sub.code); newNames.push(sub.name);
+        running+=sub.pop;
+      }
+      const finalPop=newCodes.reduce((a,c)=>a+((salAudience[c]&&salAudience[c].pop)||0),0);
+      report.push({store_id:s.id,store_name:s.name,tier:s.meta_tier,
+        before_pop:currentPop,after_pop:finalPop,target,min,max,
+        in_band:finalPop>=min&&finalPop<=max,action:'expanded'});
+
+    } else {
+      // Contract: remove furthest suburbs until in band (won't go below min)
+      const withDist=newCodes.map((code,i)=>{
+        const f=window.suburbFeatureMap&&window.suburbFeatureMap[code];
+        const c=f&&f._center;
+        return {code,name:newNames[i]||code,
+          d:c?(s.lat-c.lat)**2+(s.lng-c.lng)**2:0,
+          pop:(salAudience[code]&&salAudience[code].pop)||0,keep:true};
+      });
+      withDist.sort((a,b)=>b.d-a.d);
+      let running=currentPop;
+      for(const sub of withDist){
+        if(running<=max) break;
+        if(running-sub.pop>=min){sub.keep=false; running-=sub.pop;}
+      }
+      const kept=withDist.filter(x=>x.keep);
+      const keptSet=new Set(kept.map(x=>x.code));
+      newCodes=newCodes.filter(c=>keptSet.has(c));
+      newNames=newCodes.map(c=>{const e=kept.find(x=>x.code===c);return e?e.name:c;});
+      const finalPop=newCodes.reduce((a,c)=>a+((salAudience[c]&&salAudience[c].pop)||0),0);
+      report.push({store_id:s.id,store_name:s.name,tier:s.meta_tier,
+        before_pop:currentPop,after_pop:finalPop,target,min,max,
+        in_band:finalPop>=min&&finalPop<=max,action:'contracted'});
+    }
+
+    batchUpdates.push({store_id:s.id,
+      suburbs:newCodes.map((code,i)=>({code,name:newNames[i]||code}))});
+  });
+
+  return{report,action:batchUpdates.length?
+    {type:'batch_update',updates:batchUpdates,reason:'Tier match: resize territories to hit tier population targets'}
+    :null};
+}
+
 function buildContext(){
   buildConflictMap();
   const visible = stores.filter(s=>activeBrands.has(s.brand));
@@ -1285,7 +1379,7 @@ function addMessage(role, text, isThinking=false){
   return el;
 }
 
-const ACTION_TYPES = ['batch_update','add_suburbs','remove_suburbs','update_suburbs','update_postcodes','run_voronoi','run_sanity_check','run_radius_conflict_check'];
+const ACTION_TYPES = ['batch_update','add_suburbs','remove_suburbs','update_suburbs','update_postcodes','run_voronoi','run_sanity_check','run_radius_conflict_check','run_tier_match'];
 
 function extractActionJson(text){
   // 1. Explicit <action> tag
@@ -1393,12 +1487,29 @@ Sanity check — remove any suburb more than N km from its store (default 50km).
 Radius conflict check — remove any metro suburb whose centroid falls inside a regional store's radius circle. Use this to resolve metro/regional overlaps — never do it manually:
 <action>{"type":"run_radius_conflict_check","reason":"Remove metro suburbs that fall inside a regional store's radius"}</action>
 
+Tier match — expand or contract a store's territory so its population lands within ±20% of its tier target. Adds nearest unassigned suburbs when under-target, removes furthest suburbs when over-target:
+<action>{"type":"run_tier_match","reason":"Resize all metro stores to their tier population targets"}</action>
+<action>{"type":"run_tier_match","store_id":42,"reason":"Resize single store to its tier target"}</action>
+<action>{"type":"run_tier_match","state":"VIC","reason":"Tier match all Victorian metro stores"}</action>
+<action>{"type":"run_tier_match","brand":"HH","reason":"Tier match all HH metro stores"}</action>
+
 Manual suburb edits (use for targeted changes after Voronoi):
 <action>{"type":"add_suburbs","store_id":42,"suburbs":[{"code":"20001","name":"Abbotsford"}],"reason":"..."}</action>
 <action>{"type":"remove_suburbs","store_id":42,"codes":["20001","20002"],"reason":"..."}</action>
 <action>{"type":"update_suburbs","store_id":42,"suburbs":[{"code":"20001","name":"Abbotsford"}],"reason":"..."}</action>
 <action>{"type":"update_postcodes","store_id":7,"postcodes":["3000","3001"],"reason":"..."}</action>
 <action>{"type":"batch_update","updates":[{"store_id":1,"suburbs":[{"code":"20001","name":"Abbotsford"}]},{"store_id":2,"postcodes":["3000"]}],"reason":"..."}</action>
+
+═══ TIER TARGETS ═══
+Every metro store has a meta_tier (1–5). Territory must be sized so population lands within ±20% of target:
+  Tier 1 → $60 budget  · target 2,778 pop  · band 2,222–3,333
+  Tier 2 → $120 budget · target 5,556 pop  · band 4,444–6,667
+  Tier 3 → $280 budget · target 12,963 pop · band 10,370–15,556
+  Tier 4 → $800 budget · target 37,037 pop · band 29,630–44,444
+  Tier 5 → $1,600 budget · target 74,074 pop · band 59,259–88,889
+Formula: budget = population × 0.40 × 3 × $18 / 1,000
+
+Use run_tier_match to automatically resize. If a store cannot reach its band (e.g. insufficient suburbs nearby, geographic barrier, or radius conflicts), explain the constraint — do not silently leave it out of band.
 
 ═══ RULES ═══
 - Be concise — under 200 words unless showing a data table or explaining Voronoi decisions
@@ -1407,6 +1518,7 @@ Manual suburb edits (use for targeted changes after Voronoi):
 - Always state what changed, why, and the predicted budget impact
 - To clean up bad assignments use run_sanity_check — never try to enumerate distances manually for large stores
 - To resolve metro/regional radius overlaps use run_radius_conflict_check — never do it manually
+- To resize territories to tier targets use run_tier_match — never do it manually
 - Australian geography: Port Phillip Bay, Gulf St Vincent, Sydney Harbour, Moreton Bay etc.`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1598,6 +1710,36 @@ function applyAgentAction(actionJson){
         applySuburbsToStore(s,u.suburbs);
       });
       addMessage('agent','✓ Radius conflict check — removed '+totalFlagged+' suburb(s) across '+report.length+' metro store(s):\n'+summary);
+      if(report.length) sel=report[0].store_id;
+
+    } else if(action.type === 'run_tier_match'){
+      const {report,action:batchAction}=runTierMatch({
+        store_id:action.store_id,
+        brand:action.brand,
+        state:action.state
+      });
+      if(!batchAction){
+        const inBand=report.filter(r=>r.status==='in_band').length;
+        addMessage('agent','✓ Tier match — all '+inBand+' store(s) already within their tier population band. No changes made.');
+        return;
+      }
+      batchAction.updates.forEach(u=>{
+        const s=findStore(u.store_id,null);
+        if(!s) return;
+        applySuburbsToStore(s,u.suburbs);
+      });
+      const expanded=report.filter(r=>r.action==='expanded');
+      const contracted=report.filter(r=>r.action==='contracted');
+      const missed=report.filter(r=>(r.action==='expanded'||r.action==='contracted')&&!r.in_band);
+      let msg='✓ Tier match complete:\n';
+      if(expanded.length) msg+=expanded.map(r=>
+        `  ↑ ${r.store_name} (T${r.tier}): ${(r.before_pop||0).toLocaleString()} → ${r.after_pop.toLocaleString()} pop`+(r.in_band?'':' ⚠ still outside band')
+      ).join('\n')+'\n';
+      if(contracted.length) msg+=contracted.map(r=>
+        `  ↓ ${r.store_name} (T${r.tier}): ${(r.before_pop||0).toLocaleString()} → ${r.after_pop.toLocaleString()} pop`+(r.in_band?'':' ⚠ still outside band')
+      ).join('\n')+'\n';
+      if(missed.length) msg+=`\n⚠ ${missed.length} store(s) could not reach their band due to geographic constraints — manual review needed.`;
+      addMessage('agent', msg.trim());
       if(report.length) sel=report[0].store_id;
     }
 
