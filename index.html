@@ -1085,8 +1085,8 @@ function sendSuggestion(text){
 
 function buildContext(){
   buildConflictMap();
-  const active = stores.filter(s=>activeBrands.has(s.brand)&&!s.removed);
-  const storeList = active.map(s=>{
+  const visible = stores.filter(s=>activeBrands.has(s.brand));
+  const storeList = visible.map(s=>{
     const aud = calcStoreAudience(s);
     const rec = calcRecommendedBudget(s);
     const conflictItems = s.is_metro
@@ -1100,6 +1100,8 @@ function buildContext(){
       brand: s.brand,
       state: s.state,
       is_metro: s.is_metro,
+      removed: s.removed===true,
+      potential_removal: s.potential_removal===true,
       population: aud.pop,
       households: aud.hh,
       recommended_budget: rec.budget,
@@ -1116,12 +1118,15 @@ function buildContext(){
     }
     return base;
   });
+  const inBuy = storeList.filter(s=>!s.removed);
   return JSON.stringify({
     summary: {
-      total_active: active.length,
-      metro: active.filter(s=>s.is_metro).length,
-      regional: active.filter(s=>!s.is_metro).length,
-      stores_with_conflicts: storeList.filter(s=>s.has_conflict).length,
+      total_in_buy: inBuy.length,
+      removed: storeList.filter(s=>s.removed).length,
+      potential_removal: storeList.filter(s=>s.potential_removal&&!s.removed).length,
+      metro: inBuy.filter(s=>s.is_metro).length,
+      regional: inBuy.filter(s=>!s.is_metro).length,
+      stores_with_conflicts: storeList.filter(s=>s.has_conflict&&!s.removed).length,
       active_brands: [...activeBrands]
     },
     selected_store_id: sel,
