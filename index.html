@@ -1143,6 +1143,47 @@ function addMessage(role, text, isThinking=false){
   return el;
 }
 
+const ACTION_TYPES = ['batch_update','add_suburbs','remove_suburbs','update_suburbs','update_postcodes'];
+
+function extractActionJson(text){
+  // 1. Explicit <action> tag
+  const tagMatch = text.match(/<action>([\s\S]*?)<\/action>/);
+  if(tagMatch) return {json: tagMatch[1].trim(), raw: tagMatch[0]};
+
+  // 2. Any fenced code block whose content parses as a known action type
+  const codeRe = /```(?:json)?\s*([\s\S]*?)\s*```/g;
+  let m;
+  while((m = codeRe.exec(text)) !== null){
+    try {
+      const parsed = JSON.parse(m[1]);
+      if(ACTION_TYPES.includes(parsed.type)) return {json: m[1].trim(), raw: m[0]};
+    } catch(e){}
+  }
+
+  // 3. Bare inline JSON starting with a known action type — bracket-match to end
+  for(const type of ACTION_TYPES){
+    const needle = '{"type":"' + type + '"';
+    const start = text.indexOf(needle);
+    if(start === -1) continue;
+    let depth=0, inStr=false, esc=false;
+    for(let i=start; i<text.length; i++){
+      const c=text[i];
+      if(esc){esc=false; continue;}
+      if(c==='\\'&&inStr){esc=true; continue;}
+      if(c==='"'){inStr=!inStr; continue;}
+      if(inStr) continue;
+      if(c==='{') depth++;
+      else if(c==='}'){
+        if(--depth===0){
+          const json=text.slice(start,i+1);
+          try{ JSON.parse(json); return {json, raw:json}; } catch(e){}
+        }
+      }
+    }
+  }
+  return null;
+}
+
 async function sendMessage(){
   const input = document.getElementById('chatInput');
   const text = input.value.trim();
@@ -1232,19 +1273,20 @@ RULES:
       const replyText = data.content[0].text;
       chatHistory.push({role:'assistant', content: replyText});
 
-      // Check for action blocks
-      const actionMatch = replyText.match(/<action>(.*?)<\/action>/s);
-      const displayText = replyText.replace(/<action>.*?<\/action>/s, '').trim();
+      // Extract action JSON from anywhere in the response
+      const actionResult = extractActionJson(replyText);
+      const displayText = actionResult
+        ? replyText.replace(actionResult.raw, '').replace(/\n{3,}/g,'\n\n').trim()
+        : replyText;
 
       thinkEl.remove();
       const msgEl = addMessage('agent', displayText);
 
-      if(actionMatch){
+      if(actionResult){
         try {
-          const action = JSON.parse(actionMatch[1]);
-          // Add apply button
+          JSON.parse(actionResult.json); // validate before offering apply
           const actionId = 'action_' + (++actionCounter);
-          pendingActions[actionId] = actionMatch[1];
+          pendingActions[actionId] = actionResult.json;
           const actDiv = document.createElement('div');
           actDiv.className = 'msg-actions';
           const applyBtn = document.createElement('button');
