@@ -1135,6 +1135,34 @@ function runVoronoiAllocation(options={}){
   };
 }
 
+function runSanityCheck(thresholdKm=50){
+  const report=[], batchUpdates=[];
+  stores.forEach(s=>{
+    if(!s.is_metro||s.removed||!(s.suburbs&&s.suburbs.length)) return;
+    const flagged=[], keptSuburbs=[];
+    s.suburbs.forEach((code,i)=>{
+      const f=window.suburbFeatureMap&&window.suburbFeatureMap[code];
+      const c=f&&f._center;
+      if(!c){ keptSuburbs.push({code,name:(s.suburb_names||[])[i]||code}); return; }
+      const dist=haversineKm(s.lat,s.lng,c.lat,c.lng);
+      if(dist>thresholdKm){
+        flagged.push({code,name:(s.suburb_names||[])[i]||code,dist_km:Math.round(dist)});
+      } else {
+        keptSuburbs.push({code,name:(s.suburb_names||[])[i]||code});
+      }
+    });
+    if(flagged.length){
+      report.push({store_id:s.id,store_name:s.name,flagged});
+      batchUpdates.push({store_id:s.id,suburbs:keptSuburbs});
+    }
+  });
+  if(!batchUpdates.length) return {report:[], action:null};
+  return {
+    report,
+    action:{type:'batch_update',updates:batchUpdates,reason:`Sanity check: removed suburbs >${thresholdKm}km from store`}
+  };
+}
+
 function buildContext(){
   buildConflictMap();
   const visible = stores.filter(s=>activeBrands.has(s.brand));
@@ -1209,7 +1237,7 @@ function addMessage(role, text, isThinking=false){
   return el;
 }
 
-const ACTION_TYPES = ['batch_update','add_suburbs','remove_suburbs','update_suburbs','update_postcodes','run_voronoi'];
+const ACTION_TYPES = ['batch_update','add_suburbs','remove_suburbs','update_suburbs','update_postcodes','run_voronoi','run_sanity_check'];
 
 function extractActionJson(text){
   // 1. Explicit <action> tag
@@ -1310,6 +1338,10 @@ Trigger JavaScript Voronoi engine (handles all 3000+ suburbs instantly):
 <action>{"type":"run_voronoi","store_ids":[12,34,56],"reason":"Voronoi for three specific stores"}</action>
 <action>{"type":"run_voronoi","state":"VIC","constraints":[{"store_id":42,"min_suburbs":20},{"store_id":7,"min_suburbs":15}],"reason":"VIC Voronoi with minimum territory guarantees"}</action>
 
+Sanity check — remove any suburb more than N km from its store (default 50km). Use this instead of computing distances manually:
+<action>{"type":"run_sanity_check","reason":"Remove geographically impossible suburb assignments"}</action>
+<action>{"type":"run_sanity_check","threshold_km":30,"reason":"Tighter 30km sanity check"}</action>
+
 Manual suburb edits (use for targeted changes after Voronoi):
 <action>{"type":"add_suburbs","store_id":42,"suburbs":[{"code":"20001","name":"Abbotsford"}],"reason":"..."}</action>
 <action>{"type":"remove_suburbs","store_id":42,"codes":["20001","20002"],"reason":"..."}</action>
@@ -1322,6 +1354,7 @@ Manual suburb edits (use for targeted changes after Voronoi):
 - Only use suburb codes that exist in suburb_centroids; never invent codes
 - When resolving conflicts, reassign the contested suburb to the store with smaller dist²
 - Always state what changed, why, and the predicted budget impact
+- To clean up bad assignments use run_sanity_check — never try to enumerate distances manually for large stores
 - Australian geography: Port Phillip Bay, Gulf St Vincent, Sydney Harbour, Moreton Bay etc.`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1477,6 +1510,25 @@ function applyAgentAction(actionJson){
       addMessage('agent','✓ Voronoi complete — '+count+' stores updated, '+
         result.updates.reduce((a,u)=>a+u.suburbs.length,0)+' suburbs assigned.');
       if(result.updates.length) sel=result.updates[0].store_id;
+
+    } else if(action.type === 'run_sanity_check'){
+      const threshold=action.threshold_km||50;
+      const {report,action:batchAction}=runSanityCheck(threshold);
+      if(!batchAction){
+        addMessage('agent','✓ Sanity check passed — no suburbs found more than '+threshold+'km from their store.');
+        return;
+      }
+      const totalFlagged=report.reduce((a,r)=>a+r.flagged.length,0);
+      const summary=report.map(r=>
+        r.store_name+': '+r.flagged.map(f=>f.name+' ('+f.dist_km+'km)').join(', ')
+      ).join('\n');
+      batchAction.updates.forEach(u=>{
+        const s=findStore(u.store_id,null);
+        if(!s) return;
+        applySuburbsToStore(s,u.suburbs);
+      });
+      addMessage('agent','✓ Sanity check complete — removed '+totalFlagged+' suburb(s) across '+report.length+' store(s):\n'+summary);
+      if(report.length) sel=report[0].store_id;
     }
 
     buildConflictMap();
