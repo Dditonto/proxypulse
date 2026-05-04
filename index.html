@@ -1096,8 +1096,9 @@ function sendSuggestion(text){
 }
 
 function runVoronoiAllocation(options={}){
+  // All non-removed metro stores; M10 + HH treated as one network (no activeBrands filter)
   const targetStores = stores.filter(s=>{
-    if(!activeBrands.has(s.brand)||!s.is_metro||s.removed) return false;
+    if(!s.is_metro||s.removed) return false;
     if(options.brand && s.brand!==options.brand) return false;
     if(options.state && s.state.toUpperCase()!==options.state.toUpperCase()) return false;
     if(options.store_ids && options.store_ids.length && !options.store_ids.includes(s.id)) return false;
@@ -1105,18 +1106,24 @@ function runVoronoiAllocation(options={}){
   });
   if(!targetStores.length) return null;
 
+  // Clear all target store suburb arrays before computing
   const assignments={};
   targetStores.forEach(s=>{assignments[s.id]=[];});
 
-  (postcodeData&&postcodeData.features||[]).forEach(f=>{
-    const c=f._center; if(!c) return;
-    const code=f.properties.sal_code, name=f.properties.sal_name||code;
-    let nearest=null, minD=Infinity;
+  const CAP_KM=15;
+
+  // Iterate every suburb in the full geojson set
+  Object.keys(window.suburbFeatureMap||{}).forEach(code=>{
+    const f=window.suburbFeatureMap[code];
+    const c=f&&f._center; if(!c) return;
+    const name=f.properties.sal_name||code;
+    let nearest=null, minDist=Infinity;
     targetStores.forEach(s=>{
-      const d=(s.lat-c.lat)**2+(s.lng-c.lng)**2; // squared dist sufficient for comparison
-      if(d<minD){minD=d;nearest=s;}
+      const dist=haversineKm(s.lat,s.lng,c.lat,c.lng);
+      if(dist<minDist){minDist=dist;nearest=s;}
     });
-    if(nearest) assignments[nearest.id].push({code,name});
+    // Skip if nearest store is beyond 15km cap (genuine coverage gap)
+    if(nearest && minDist<=CAP_KM) assignments[nearest.id].push({code,name});
   });
 
   // Enforce min_suburbs constraints: pull closest suburbs from neighbours
@@ -1130,7 +1137,7 @@ function runVoronoiAllocation(options={}){
         (assignments[other.id]||[]).forEach(sub=>{
           const f=window.suburbFeatureMap&&window.suburbFeatureMap[sub.code];
           if(!f||!f._center) return;
-          const d=(ts.lat-f._center.lat)**2+(ts.lng-f._center.lng)**2;
+          const d=haversineKm(ts.lat,ts.lng,f._center.lat,f._center.lng);
           if(d<bestD){bestD=d;bestSub=sub;bestFrom=other.id;}
         });
       });
