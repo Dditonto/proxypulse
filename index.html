@@ -1731,6 +1731,11 @@ function applyAgentAction(actionJson){
     function applySuburbsToStore(s, suburbs){
       s.suburbs = suburbs.map(x=>x.code);
       s.suburb_names = suburbs.map(x=>x.name||x.code);
+      // Keep total_pop/total_hh in sync so console diagnostics and any other
+      // code reading these fields reflects the current territory, not STORES_DATA values.
+      const _aud = calcStoreAudience(s);
+      s.total_pop = _aud.pop;
+      s.total_hh  = _aud.hh;
     }
 
     if(action.type === 'add_suburbs'){
