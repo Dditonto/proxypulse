@@ -1146,33 +1146,61 @@ function toggleTerritoryMode(){
 
 
 function exportCSV(){
-  const header=['Store ID','Name','State','Brand','Tier','Meta Targeting Type','Territory Definition','Total Population','Total Households','Recommended Budget','Variance %','Variance Reason'];
+  const header=['Store ID','Name','State','Brand','Tier','Current Budget','Meta Targeting Type','Territory Definition','Total Population','Total Households','Recommended Budget','Variance %','Variance Reason'];
   const rows=[header.join(',')];
   const esc=v=>'"'+String(v==null?'':v).replace(/"/g,'""')+'"';
   stores.filter(s=>!s.removed).forEach(s=>{
     const aud=calcStoreAudience(s);
     const rec=calcRecommendedBudget(s);
     const tier=s.meta_tier||'';
-    const {min,max,pop:target}=calcTierTarget(tier);
-    const pop=aud.pop;
-    const metaTargetingType=(s.is_metro||s.territory_mode==='suburbs')?'postcode':'radius';
-    const territoryDefinition=(s.is_metro||s.territory_mode==='suburbs')
-      ?(s.suburb_names||s.suburbs||[]).join(', ')
-      :(s.radius||'')+'km';
+    const {budget:tierBudget,min,max,pop:target}=calcTierTarget(tier);
+    const isRadiusMode=!s.is_metro&&s.territory_mode==='radius';
+
+    // For radius-mode stores use SAL-centroid population within the radius circle
+    // (same method as applyRadiusFallback) so variance reflects the sized circle,
+    // not the unrelated postcode coverage that calcStoreAudience returns in radius mode.
+    let pop=aud.pop;
+    if(isRadiusMode&&postcodeData&&s.radius){
+      pop=0;
+      postcodeData.features.forEach(f=>{
+        if(!f._center) return;
+        if(haversineKm(s.lat,s.lng,f._center.lat,f._center.lng)<=s.radius)
+          pop+=(salAudience[f.properties.sal_code]&&salAudience[f.properties.sal_code].pop)||0;
+      });
+    }
+
+    const metaTargetingType=isRadiusMode?'radius':'postcode';
+    const territoryDefinition=isRadiusMode
+      ?(s.radius||'')+'km'
+      :(s.suburb_names||s.suburbs||[]).join(', ');
+    const currentBudget=tierBudget?'$'+tierBudget.toLocaleString():'';
+
     let variancePct='',varianceReason='';
     if(tier&&target>0){
       variancePct=Math.round((pop-target)/target*100)+'%';
-      if(pop>=min&&pop<=max) varianceReason='In band';
-      else if(s.variance_reason) varianceReason=s.variance_reason;
-      else if(pop>max) varianceReason='Overshoot — geographic constraint, manual review needed';
-      else varianceReason='Undershoot — surrounding suburbs exhausted, manual review needed';
+      if(isRadiusMode){
+        const inBand=pop>=min&&pop<=max;
+        const autoToggled=s.variance_reason&&s.variance_reason.includes('Auto-toggled');
+        if(inBand){
+          varianceReason=autoToggled?'Auto-toggled to radius — sized to tier target':'Radius mode — sized to tier target';
+        } else {
+          varianceReason='Radius mode — could not fit tier (manual review)';
+        }
+      } else {
+        if(pop>=min&&pop<=max) varianceReason='In band';
+        else if(s.variance_reason) varianceReason=s.variance_reason;
+        else if(pop>max) varianceReason='Overshoot — geographic constraint, manual review needed';
+        else varianceReason='Undershoot — surrounding suburbs exhausted, manual review needed';
+      }
     }
+
     rows.push([
       esc(s.store_id||s.id),
       esc(s.name),
       esc(s.state),
       esc(s.brand),
       tier,
+      esc(currentBudget),
       esc(metaTargetingType),
       esc(territoryDefinition),
       pop,
