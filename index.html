@@ -1146,19 +1146,46 @@ function toggleTerritoryMode(){
 
 
 function exportCSV(){
-  const rows=['Store Name,State,Suburb,Latitude,Longitude,Type,Radius (km),Postcodes,Suburbs,Suburb Names,Total Population,Total Households'];
-  stores.forEach(s=>{
+  const header=['Store ID','Name','State','Brand','Tier','Meta Targeting Type','Territory Definition','Total Population','Total Households','Recommended Budget','Variance %','Variance Reason'];
+  const rows=[header.join(',')];
+  const esc=v=>'"'+String(v==null?'':v).replace(/"/g,'""')+'"';
+  stores.filter(s=>!s.removed).forEach(s=>{
     const aud=calcStoreAudience(s);
-    const pcs=(s.postcodes||[]).join('; ');
-    const subs=(s.suburbs||[]).join('; ');
-    const subNames=(s.suburb_names||[]).join('; ');
-    const storeType=s.is_metro?'Metro':'Regional';
-    rows.push(`"${s.name}","${s.state}","${s.suburb}",${s.lat},${s.lng},"${storeType}",${s.radius},"${pcs}","${subs}","${subNames}",${aud.pop},${aud.hh}`);
+    const rec=calcRecommendedBudget(s);
+    const tier=s.meta_tier||'';
+    const {min,max,pop:target}=calcTierTarget(tier);
+    const pop=aud.pop;
+    const metaTargetingType=(s.is_metro||s.territory_mode==='suburbs')?'postcode':'radius';
+    const territoryDefinition=(s.is_metro||s.territory_mode==='suburbs')
+      ?(s.suburb_names||s.suburbs||[]).join(', ')
+      :(s.radius||'')+'km';
+    let variancePct='',varianceReason='';
+    if(tier&&target>0){
+      variancePct=Math.round((pop-target)/target*100)+'%';
+      if(pop>=min&&pop<=max) varianceReason='In band';
+      else if(s.variance_reason) varianceReason=s.variance_reason;
+      else if(pop>max) varianceReason='Overshoot — geographic constraint, manual review needed';
+      else varianceReason='Undershoot — surrounding suburbs exhausted, manual review needed';
+    }
+    rows.push([
+      esc(s.store_id||s.id),
+      esc(s.name),
+      esc(s.state),
+      esc(s.brand),
+      tier,
+      esc(metaTargetingType),
+      esc(territoryDefinition),
+      pop,
+      aud.hh,
+      rec.budget,
+      esc(variancePct),
+      esc(varianceReason)
+    ].join(','));
   });
   const blob=new Blob([rows.join('\n')],{type:'text/csv'});
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
-  a.download='localyse_territories_export.csv';
+  a.download='proxypulse_territories_export.csv';
   a.click();
 }
 
@@ -1513,6 +1540,53 @@ function runTierMatch(options={}){
     :null};
 }
 
+function applyRadiusFallback(){
+  // For each egregiously-overshoot suburbs-mode regional store where the finest
+  // SAL granularity still exceeds tier_max, switch to radius mode and compute
+  // the smallest radius_km whose cumulative SAL population reaches tier_min.
+  const changed=[];
+  stores.forEach(s=>{
+    if(s.removed||s.is_metro||s.territory_mode!=='suburbs'||!s.meta_tier) return;
+    const {min,max,pop:target}=calcTierTarget(s.meta_tier);
+    const pop=calcStoreAudience(s).pop;
+    if(pop>=min&&pop<=max) return;   // in band
+    if(pop<min) return;               // undershoot — not this function's job
+    if((pop-target)/target*100<=100) return;  // only egregious overshoots (>100% variance)
+    // Check whether trimming individual SALs could ever land in band
+    const subPops=(s.suburbs||[]).map(c=>(salAudience[c]&&salAudience[c].pop)||0);
+    if(!subPops.length) return;
+    if(Math.min(...subPops)<=max) return;  // smallest SAL fits; trimming might still work
+    // Granularity problem: switch to radius
+    s.territory_mode='radius';
+    s._overlapFrac=null;
+    // Find smallest radius (km) where cumulative SAL pop reaches tier_min
+    let radius_km=s.radius||50;
+    if(postcodeData&&postcodeData.features){
+      const sorted=postcodeData.features
+        .filter(f=>f._center)
+        .map(f=>({
+          d:haversineKm(s.lat,s.lng,f._center.lat,f._center.lng),
+          pop:(salAudience[f.properties.sal_code]&&salAudience[f.properties.sal_code].pop)||0
+        }))
+        .sort((a,b)=>a.d-b.d);
+      let cum=0;
+      // Default to covering all SALs if we never reach min
+      radius_km=sorted.length?Math.ceil(sorted[sorted.length-1].d):50;
+      for(const sub of sorted){
+        cum+=sub.pop;
+        if(cum>=min){radius_km=Math.max(1,Math.ceil(sub.d));break;}
+      }
+    }
+    s.radius=radius_km;
+    s.variance_reason='Auto-toggled to radius — smallest available suburb exceeds tier max';
+    const aud=calcStoreAudience(s);
+    s.total_pop=aud.pop;
+    s.total_hh=aud.hh;
+    changed.push(s.id);
+  });
+  return changed;
+}
+
 function buildContext(){
   buildConflictMap();
   const visible = stores.filter(s=>activeBrands.has(s.brand));
@@ -1571,7 +1645,7 @@ function addMessage(role, text, isThinking=false){
   return el;
 }
 
-const ACTION_TYPES = ['batch_update','add_suburbs','remove_suburbs','update_suburbs','update_postcodes','run_voronoi','run_sanity_check','run_radius_conflict_check','run_tier_match','set_territory_mode'];
+const ACTION_TYPES = ['batch_update','add_suburbs','remove_suburbs','update_suburbs','update_postcodes','run_voronoi','run_sanity_check','run_radius_conflict_check','run_tier_match','set_territory_mode','set_radius_fallback'];
 
 function extractActionJson(text){
   // 1. Explicit <action> tag
@@ -1964,6 +2038,10 @@ function applyAgentAction(actionJson){
       }
       addMessage('agent','✓ '+s.name+' — territory mode set to '+newMode+'.');
       sel=s.id;
+
+    } else if(action.type === 'set_radius_fallback'){
+      const changed=applyRadiusFallback();
+      addMessage('agent','✓ Radius fallback applied to '+changed.length+' store(s). These stores had egregious overshoot where even the smallest available suburb exceeds the tier max, so they were auto-toggled to radius mode.');
     }
 
     buildConflictMap();
