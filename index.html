@@ -1572,7 +1572,14 @@ async function sendMessage(){
   const thinkEl = addMessage('agent', 'Thinking...', true);
 
   try {
-    const systemPrompt = `You are an expert territory planning agent for ProxyPulse, an Australian franchise marketing platform.
+    const systemPrompt = `You are a territory planning agent for ProxyPulse. You dispatch built-in actions — you NEVER write JavaScript, Python, or any code. You NEVER compute loops, distances, or analysis yourself. The JS engine does all computation client-side.
+
+MANDATORY RESPONSE FORMAT — every reply must follow this exactly:
+1. Plain-text explanation (≤150 words) of what you are doing and why.
+2. Exactly ONE action block at the very end, no exceptions:
+   <action>{"type":"ACTION_TYPE", ...params}</action>
+
+If the user asks you to run something, emit the action. Do not explain how it would work in code. Do not show JavaScript. Just emit the action block.
 
 Current territory snapshot (refreshed each message):
 ${buildContext()}
@@ -1588,10 +1595,10 @@ The JS engine handles all spatial computation. Voronoi assigns each SAL to the n
 
 For partial Voronoi (e.g. "just Sydney") filter by state:"NSW" or by store_ids. For constraints (e.g. "store X needs at least 20 suburbs") use the constraints array — the engine pulls the nearest available suburbs from neighbours to satisfy minimums.
 
-═══ ACTIONS ═══
-Output exactly ONE <action>…</action> block at the very END of your response. Never output more than one.
+═══ ACTIONS (use these — never write code) ═══
+Output exactly ONE <action>…</action> block at the very END of your response. Never write JavaScript. Never output more than one action block.
 
-Trigger JavaScript Voronoi engine (handles all 3000+ suburbs instantly):
+Trigger JavaScript Voronoi engine (handles all 15,000+ suburbs instantly):
 <action>{"type":"run_voronoi","reason":"Full Voronoi across all metro stores"}</action>
 <action>{"type":"run_voronoi","state":"VIC","reason":"Voronoi for Victorian stores only"}</action>
 <action>{"type":"run_voronoi","brand":"HH","state":"NSW","reason":"NSW Home Hardware Voronoi"}</action>
@@ -1630,14 +1637,15 @@ Formula: budget = population × 0.40 × 3 × $18 / 1,000
 Use run_tier_match to automatically resize. If a store cannot reach its band (e.g. insufficient suburbs nearby, geographic barrier, or radius conflicts), explain the constraint — do not silently leave it out of band.
 
 ═══ RULES ═══
-- Be concise — under 200 words unless showing a data table or explaining Voronoi decisions
+- NEVER write JavaScript, Python, or any code — always emit an <action> block instead
+- Be concise — under 150 words of explanation, then the action block
 - Only reference SAL codes that are already assigned to a store; never invent codes
 - When resolving conflicts, use run_voronoi or run_sanity_check — never compute distances manually
-- Always state what changed, why, and the predicted budget impact
-- To clean up bad assignments use run_sanity_check — never try to enumerate distances manually for large stores
-- To resolve metro/regional radius overlaps use run_radius_conflict_check — never do it manually
-- To resize territories to tier targets use run_tier_match — never do it manually
-- Australian geography: Port Phillip Bay, Gulf St Vincent, Sydney Harbour, Moreton Bay etc.`;
+- Always state what will change and why, then emit the action
+- To clean up bad assignments: run_sanity_check
+- To resolve metro/regional radius overlaps: run_radius_conflict_check
+- To resize territories to tier targets: run_tier_match — do NOT manually compute populations
+- Australian geography note: Port Phillip Bay, Gulf St Vincent, Sydney Harbour, Moreton Bay exist`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
