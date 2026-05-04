@@ -368,6 +368,11 @@
       <div class="etitle" id="edMode">Store Details</div>
       <div class="ename" id="en">—</div>
 
+      <!-- Territory mode toggle — regional stores only -->
+      <div id="terrModeRow" style="display:none;margin:4px 0 8px;">
+        <button id="terrModeBtn" class="btn" style="width:100%;font-size:10px;letter-spacing:0.4px;" onclick="toggleTerritoryMode()"></button>
+      </div>
+
       <!-- Audience panel always visible -->
       <div class="aud-panel" id="audPanel">
         <div class="aud-row">
@@ -499,7 +504,8 @@ Promise.all([Promise.resolve(STORES_DATA),fetch("suburbs.geojson").then(r=>r.jso
     suburbs_original:[...(s.suburbs||[])],
     suburb_names:[...(s.suburb_names||[])],
     radius_original:s.radius,
-    meta_tier: parseInt(s.tier)||null
+    meta_tier: parseInt(s.tier)||null,
+    territory_mode: s.is_metro ? 'suburbs' : 'radius'
   }));
   buildConflictMap();
   document.getElementById('fname').textContent=`Mitre 10 — ${stores.length} stores`;
@@ -534,7 +540,7 @@ function buildConflictMap(){
 
 function calcStoreAudience(s){
   let pop=0,hh=0;
-  if(s.is_metro){
+  if(s.is_metro||s.territory_mode==='suburbs'){
     (s.suburbs||[]).forEach(code=>{ const a=salAudience[code]; if(a){pop+=a.pop;hh+=a.hh;} });
   } else {
     (s.postcodes||[]).forEach(pc=>{ const a=pcAudience[pc]; if(a){pop+=a.pop;hh+=a.hh;} });
@@ -634,7 +640,7 @@ function resetToOriginal(){
 
 function calcRecommendedBudget(s){
   let pop=0;
-  if(s.is_metro){
+  if(s.is_metro||s.territory_mode==='suburbs'){
     (s.suburbs||[]).forEach(code=>{ pop+=(salAudience[code]?.pop||0); });
   } else {
     (s.postcodes||[]).forEach(pc=>{ pop+=(pcAudience[pc]?.pop||0); });
@@ -776,6 +782,21 @@ function showEditor(id){
   document.getElementById('ri').value=s.radius;
   let budgetPanel=document.getElementById('budgetPanel');
   if(!budgetPanel){ budgetPanel=document.createElement('div');budgetPanel.id='budgetPanel';budgetPanel.className='budget-panel';document.getElementById('audPanel').after(budgetPanel); }
+  // Territory mode toggle — regional only
+  const modeRow=document.getElementById('terrModeRow');
+  const modeBtn=document.getElementById('terrModeBtn');
+  if(modeRow&&modeBtn){
+    if(!s.is_metro){
+      modeRow.style.display='block';
+      const inSuburbs=s.territory_mode==='suburbs';
+      modeBtn.textContent=inSuburbs?'⬡ Suburbs mode — tap to switch to Radius':'◎ Radius mode — tap to switch to Suburbs';
+      modeBtn.style.background=inSuburbs?'rgba(0,229,255,0.12)':'rgba(255,152,0,0.12)';
+      modeBtn.style.borderColor=inSuburbs?'rgba(0,229,255,0.3)':'rgba(255,152,0,0.4)';
+      modeBtn.style.color=inSuburbs?'var(--accent)':'#ff9800';
+    } else {
+      modeRow.style.display='none';
+    }
+  }
   updatePanelForStore(s);
 }
 
@@ -947,9 +968,9 @@ function renderTerritoryLayer(){
       const audStr=aud?`<div class="taud">👥 ${fmt(aud.pop)} people &nbsp; 🏠 ${fmt(aud.hh)} households</div>`:'';
       l.bindTooltip(`<div class="tn">${salName}</div>${audStr}`,{className:'pc-tooltip',sticky:true});
       l.on('mouseover',()=>{
-        console.log('hover fired', f.properties.sal_name);
         const selStore=sel!==null?stores.find(x=>x.id===sel):null;
-        if(selStore?.is_metro){
+        const canEdit=selStore&&(selStore.is_metro||selStore.territory_mode==='suburbs');
+        if(canEdit){
           const inSel=(selStore.suburbs||[]).includes(salCode);
           const actionStr=inSel
             ?`<div style="color:#ff453a;font-size:10px;margin-top:4px">🗑 Click to remove from ${selStore.name}</div>`
@@ -966,11 +987,12 @@ function renderTerritoryLayer(){
       });
       l.on('click',()=>{
         const selStore=sel!==null?stores.find(x=>x.id===sel):null;
-        if(!selStore?.is_metro) return;
+        const canEdit=selStore&&(selStore.is_metro||selStore.territory_mode==='suburbs');
+        if(!canEdit) return;
         const idx=(selStore.suburbs||[]).indexOf(salCode);
         saveUndoState();
-        if(idx>=0){ selStore.suburbs.splice(idx,1); selStore.suburb_names.splice(idx,1); }
-        else { selStore.suburbs.push(salCode); selStore.suburb_names.push(salName); }
+        if(idx>=0){ selStore.suburbs.splice(idx,1); (selStore.suburb_names||[]).splice(idx,1); }
+        else { (selStore.suburbs=selStore.suburbs||[]).push(salCode); (selStore.suburb_names=selStore.suburb_names||[]).push(salName); }
         buildConflictMap();
         renderList();updateGlobalStats();
         setTimeout(()=>{ renderTerritoryLayer(); if(sel!==null) showEditor(sel); },300);
@@ -978,10 +1000,11 @@ function renderTerritoryLayer(){
     }
   }).addTo(map);
 
-  // Layer 2: assigned suburbs only — colored on top, gets event priority over allSuburbsLayer
+  // Layer 2: assigned suburbs — metro + regional-in-suburbs-mode, colored on top
   const features=[];
   stores.forEach(s=>{
-    if(!activeBrands.has(s.brand)||!s.is_metro) return;
+    const useSuburbs=s.is_metro||s.territory_mode==='suburbs';
+    if(!activeBrands.has(s.brand)||!useSuburbs) return;
     (s.suburbs||[]).forEach((code,i)=>{
       const f=window.suburbFeatureMap[code];
       if(!f) return;
@@ -1018,19 +1041,78 @@ function renderTerritoryLayer(){
     labelLayer.addTo(map);
   }
 
-  // ── REGIONAL: radius circles ──
+  // ── REGIONAL: radius circles (territory_mode='radius') ──
   stores.forEach(s=>{
-    if(!activeBrands.has(s.brand)||s.is_metro) return;
+    if(!activeBrands.has(s.brand)||s.is_metro||s.territory_mode==='suburbs') return;
     const isSel=sel!==null&&s.id===sel;const hasSelection=sel!==null;
     const aud=calcStoreAudience(s);
+    // 10% metro-overlap check — computed lazily only for selected store
+    let overlapFrac=0;
+    if(isSel){
+      if(s._overlapFrac==null) s._overlapFrac=computeRadiusMetroOverlap(s);
+      overlapFrac=s._overlapFrac;
+    }
+    const clipped=overlapFrac>0.10;
+    const circleColor=clipped?'#ff9800':s.color;
     const fillOpacity=isSel?0.22:hasSelection?0.04:0.1;
     const opacity=isSel?1:hasSelection?0.2:0.6;
-    const weight=isSel?2.5:1;
-    const circle=L.circle([s.lat,s.lng],{radius:s.radius*1000,color:s.color,fillColor:s.color,fillOpacity,weight,opacity,dashArray:isSel?null:'4,6'}).addTo(map);
-    circle.bindTooltip(`<div class="tn">${s.name}</div><div class="tm">${s.suburb} ${s.state} · Regional · ${s.radius}km</div><div class="taud">👥 ${fmt(aud.pop)} people &nbsp; 🏠 ${fmt(aud.hh)} households</div>`,{className:'tt',sticky:false});
+    const weight=isSel?(clipped?3:2.5):1;
+    const dashArray=clipped?'6,3':(isSel?null:'4,6');
+    const overlapNote=clipped?`<div style="color:#ff9800;font-size:10px;margin-top:4px">⚠ ${Math.round(overlapFrac*100)}% of radius overlaps metro territory (>10%)</div>`:'';
+    const circle=L.circle([s.lat,s.lng],{radius:s.radius*1000,color:circleColor,fillColor:circleColor,fillOpacity,weight,opacity,dashArray}).addTo(map);
+    circle.bindTooltip(`<div class="tn">${s.name}</div><div class="tm">${s.suburb} ${s.state} · Regional · ${s.radius}km</div><div class="taud">👥 ${fmt(aud.pop)} people &nbsp; 🏠 ${fmt(aud.hh)} households</div>${overlapNote}`,{className:'tt',sticky:false});
     circle.on('click',()=>pick(s.id));
     window._regionalCircles.push(circle);
   });
+}
+
+function computeRadiusMetroOverlap(s){
+  if(!postcodeData||!s.radius) return 0;
+  const metroOwned=new Set();
+  stores.forEach(ms=>{ if(ms.is_metro&&!ms.removed)(ms.suburbs||[]).forEach(c=>metroOwned.add(c)); });
+  let metro=0,total=0;
+  postcodeData.features.forEach(f=>{
+    if(!f._center) f._center=getBBoxCenter(f.geometry);
+    if(!f._center) return;
+    if(haversineKm(s.lat,s.lng,f._center.lat,f._center.lng)>s.radius) return;
+    total++;
+    if(metroOwned.has(f.properties.sal_code)) metro++;
+  });
+  return total>0?metro/total:0;
+}
+
+function toggleTerritoryMode(){
+  if(sel===null) return;
+  const s=stores.find(x=>x.id===sel);
+  if(!s||s.is_metro) return;
+  saveUndoState();
+  const newMode=s.territory_mode==='suburbs'?'radius':'suburbs';
+  s.territory_mode=newMode;
+  s._overlapFrac=null;
+  if(newMode==='suburbs'){
+    // Assign SALs within 15km that aren't metro-owned
+    const metroOwned=new Set();
+    stores.forEach(ms=>{ if(ms.is_metro&&!ms.removed)(ms.suburbs||[]).forEach(c=>metroOwned.add(c)); });
+    const newSubs=[],newNames=[];
+    if(postcodeData){
+      postcodeData.features.forEach(f=>{
+        if(!f._center) f._center=getBBoxCenter(f.geometry);
+        if(!f._center) return;
+        const code=f.properties.sal_code;
+        if(metroOwned.has(code)) return;
+        if(haversineKm(s.lat,s.lng,f._center.lat,f._center.lng)<=15){
+          newSubs.push(code);
+          newNames.push(f.properties.sal_name||code);
+        }
+      });
+    }
+    s.suburbs=newSubs;
+    s.suburb_names=newNames;
+  }
+  buildConflictMap();
+  renderList();
+  updateGlobalStats();
+  setTimeout(()=>{ renderTerritoryLayer();showEditor(sel); },150);
 }
 
 
