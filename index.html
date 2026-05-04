@@ -551,8 +551,11 @@ function buildConflictMap(){
   conflictPCs=new Set(Object.keys(pcToStores).filter(k=>{
     const ids=pcToStores[k];
     if(ids.length<2) return false;
-    const ms=ids.filter(id=>stores.find(x=>x.id===id)?.is_metro);
-    return ms.length>1;
+    const subsModeCount=ids.filter(id=>{
+      const st=stores.find(x=>x.id===id);
+      return st&&!st.removed&&(st.is_metro||st.territory_mode==='suburbs');
+    }).length;
+    return subsModeCount>1;
   }));
 }
 
@@ -568,7 +571,7 @@ function calcStoreAudience(s){
 
 function updateGlobalStats(){
   const activeNonRemoved=stores.filter(s=>activeBrands.has(s.brand)&&!s.removed);
-  const conflicts=activeNonRemoved.filter(s=>s.is_metro&&(s.suburbs||[]).some(k=>conflictPCs.has(k)));
+  const conflicts=activeNonRemoved.filter(s=>(s.is_metro||s.territory_mode==='suburbs')&&(s.suburbs||[]).some(k=>conflictPCs.has(k)));
   let totalPop=0,totalHH=0;
   activeNonRemoved.forEach(s=>{ const a=calcStoreAudience(s); totalPop+=a.pop; totalHH+=a.hh; });
   document.getElementById('sS').textContent=activeNonRemoved.length;
@@ -576,7 +579,7 @@ function updateGlobalStats(){
   document.getElementById('sPop').textContent=fmt(totalPop);
   document.getElementById('sHH').textContent=fmt(totalHH);
   const w=document.getElementById('ow');
-  if(conflictPCs.size>0&&!useVoronoi){w.style.display='block';w.textContent=`⚠ ${conflictPCs.size} metro suburbs shared between stores — hit Auto-Assign to fix`;}
+  if(conflictPCs.size>0){w.style.display='block';w.style.background='';w.style.borderColor='';w.style.color='';w.textContent=`⚠ ${conflictPCs.size} suburbs claimed by multiple stores — hit Auto-Assign to fix`;}
   else if(useVoronoi){w.style.display='block';w.style.background='rgba(39,174,96,0.1)';w.style.borderColor='rgba(39,174,96,0.3)';w.style.color='var(--green)';w.textContent='✓ Territories auto-assigned — zero conflicts';}
   else w.style.display='none';
 }
@@ -613,11 +616,20 @@ function autoAssignTerritories(){
             hideOverlay();
             saveUndoState();
             useVoronoi=true;
+            // Apply preferred radii before Voronoi so radius-based caps are correct
             stores.forEach(s=>{
-              if(s.postcodes_voronoi) s.postcodes=s.postcodes_voronoi;
               if(!s.is_metro&&s.optimal_radius) s.radius=s.optimal_radius;
               if(s.is_metro&&s.metro_radius) s.radius=s.metro_radius;
             });
+            // Run Voronoi for metro + all regional-in-suburbs-mode (nearest-wins, no duplicates)
+            const _vr=runVoronoiAllocation({});
+            if(_vr&&_vr.updates){
+              _vr.updates.forEach(u=>{
+                const s=stores.find(x=>x.id===u.store_id); if(!s) return;
+                s.suburbs=u.suburbs.map(x=>x.code);
+                s.suburb_names=u.suburbs.map(x=>x.name||x.code);
+              });
+            }
             buildConflictMap();
             sel=null;
             document.getElementById('btnAutoAssign').style.display='none';
@@ -1244,23 +1256,26 @@ function runVoronoiAllocation(options={}){
     }
   });
 
-  // Regional in suburbs mode: claim suburbs within store.radius, excluding metro-owned
+  // Regional in suburbs mode: nearest-wins Voronoi capped to each store's own radius.
+  // Each SAL is checked against all regional stores and goes only to the nearest one
+  // whose radius includes it — guaranteeing zero regional-vs-regional duplicates.
   const regionalAssignments={};
-  targetRegional.forEach(s=>{
-    const r=s.radius||0;
-    const subs=[];
-    if(r){
-      const dLat=r/111, dLng=r/(111*Math.cos(s.lat*Math.PI/180));
-      Object.keys(window.suburbFeatureMap||{}).forEach(code=>{
-        if(metroOwned.has(code)) return;
-        const f=window.suburbFeatureMap[code];
-        const c=f&&f._center; if(!c) return;
-        if(Math.abs(c.lat-s.lat)>dLat||Math.abs(c.lng-s.lng)>dLng) return;
-        if(haversineKm(s.lat,s.lng,c.lat,c.lng)<=r) subs.push({code,name:f.properties.sal_name||code});
+  targetRegional.forEach(s=>{regionalAssignments[s.id]=[];});
+  if(targetRegional.length>0){
+    Object.keys(window.suburbFeatureMap||{}).forEach(code=>{
+      if(metroOwned.has(code)) return;
+      const f=window.suburbFeatureMap[code];
+      const c=f&&f._center; if(!c) return;
+      const name=f.properties.sal_name||code;
+      let nearest=null, minDist=Infinity;
+      targetRegional.forEach(s=>{
+        const r=s.radius||0; if(!r) return;
+        const dist=haversineKm(s.lat,s.lng,c.lat,c.lng);
+        if(dist<=r&&dist<minDist){minDist=dist;nearest=s;}
       });
-    }
-    regionalAssignments[s.id]=subs;
-  });
+      if(nearest) regionalAssignments[nearest.id].push({code,name});
+    });
+  }
 
   const allUpdates=[
     ...targetMetro.map(s=>({store_id:s.id,suburbs:metroAssignments[s.id]})),
