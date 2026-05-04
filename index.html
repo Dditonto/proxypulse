@@ -1461,29 +1461,24 @@ function buildContext(){
     const base = {
       id: s.id,
       name: s.name,
-      lat: s.lat,
-      lng: s.lng,
       brand: s.brand,
       state: s.state,
       is_metro: s.is_metro,
+      tier: s.meta_tier||null,
+      territory_mode: s.territory_mode||'suburbs',
       removed: s.removed===true,
       potential_removal: s.potential_removal===true,
       population: aud.pop,
       households: aud.hh,
       recommended_budget: rec.budget,
-      impressions: rec.impressions,
       has_conflict: conflictItems.length > 0
     };
     if(s.is_metro||s.territory_mode==='suburbs'){
-      base.suburbs = (s.suburbs||[]).map((code,i)=>({code, name:(s.suburb_names||[])[i]||code}));
-      base.territory_mode = 'suburbs';
+      base.suburb_count = (s.suburbs||[]).length;
       if(!s.is_metro) base.radius_km = s.radius;
-      if(conflictItems.length) base.conflicting_suburbs = conflictItems;
+      if(conflictItems.length) base.conflicting_suburbs = conflictItems.slice(0,10);
     } else {
-      base.postcodes = s.postcodes||[];
       base.radius_km = s.radius;
-      base.territory_mode = 'radius';
-      if(conflictItems.length) base.conflicting_postcodes = conflictItems;
     }
     return base;
   });
@@ -1499,21 +1494,7 @@ function buildContext(){
       active_brands: [...activeBrands]
     },
     selected_store_id: sel,
-    stores: storeList,
-    suburb_centroids: (()=>{
-      const out={};
-      if(postcodeData) postcodeData.features.forEach(f=>{
-        if(!f._center) return;
-        const code=f.properties.sal_code;
-        const pop=(salAudience[code]&&salAudience[code].pop)||0;
-        out[code]=[
-          Math.round(f._center.lat*10000)/10000,
-          Math.round(f._center.lng*10000)/10000,
-          pop
-        ];
-      });
-      return out;
-    })()
+    stores: storeList
   });
 }
 
@@ -1597,25 +1578,15 @@ Current territory snapshot (refreshed each message):
 ${buildContext()}
 
 ═══ DATA STRUCTURE ═══
-• stores[]: id, name, lat, lng, brand, state, is_metro, removed, potential_removal, population, households, recommended_budget, impressions, has_conflict
-  – Metro: suburbs:[{code,name}] using SAL suburb polygons
-  – Regional: postcodes:[], radius_km using radius circles
-• suburb_centroids{}: sal_code → [lat, lng, population]  (2021 ABS Census Tot_P_P, all metro suburbs)
+• stores[]: id, name, brand, state, is_metro, tier, territory_mode, removed, potential_removal, population, households, recommended_budget, suburb_count (or radius_km), has_conflict
+  – Metro/suburbs-mode: suburb_count = number of SAL polygons assigned
+  – Regional/radius-mode: radius_km = coverage radius
+• Full suburb lists and centroids are held client-side by the JS engine — use actions to query or modify them.
 
 ═══ VORONOI ALGORITHM ═══
-Voronoi assigns each suburb to the nearest metro store by straight-line distance:
-  dist² = (store.lat − centroid_lat)² + (store.lng − centroid_lng)²
-  (no sqrt needed for comparison; Euclidean is accurate enough within a metro area)
+The JS engine handles all spatial computation. Voronoi assigns each SAL to the nearest store within its coverage radius using haversine distance. Regional stores in suburbs mode compete with each other; metro stores have a 15km cap.
 
-To reason about a specific assignment: look up suburb_centroids[code] for [lat,lng,pop], compute dist² to each candidate store, pick minimum.
-
-Budget prediction before applying:
-  predicted_pop = sum of suburb_centroids[code][2] for all suburbs assigned to that store
-  budget = predicted_pop × 0.40 × 3 × 18 / 1000
-
-When explaining Voronoi decisions, show a sample of 3–5 suburbs with their distances to the winning store vs the nearest competitor, to illustrate why each was assigned.
-
-For partial Voronoi (e.g. "just Sydney") filter by state:"NSW" or by store_ids. For constraints (e.g. "store X needs at least 20 suburbs") use the constraints array — the engine will pull the nearest available suburbs from neighbours to satisfy minimums.
+For partial Voronoi (e.g. "just Sydney") filter by state:"NSW" or by store_ids. For constraints (e.g. "store X needs at least 20 suburbs") use the constraints array — the engine pulls the nearest available suburbs from neighbours to satisfy minimums.
 
 ═══ ACTIONS ═══
 Output exactly ONE <action>…</action> block at the very END of your response. Never output more than one.
@@ -1660,8 +1631,8 @@ Use run_tier_match to automatically resize. If a store cannot reach its band (e.
 
 ═══ RULES ═══
 - Be concise — under 200 words unless showing a data table or explaining Voronoi decisions
-- Only use suburb codes that exist in suburb_centroids; never invent codes
-- When resolving conflicts, reassign the contested suburb to the store with smaller dist²
+- Only reference SAL codes that are already assigned to a store; never invent codes
+- When resolving conflicts, use run_voronoi or run_sanity_check — never compute distances manually
 - Always state what changed, why, and the predicted budget impact
 - To clean up bad assignments use run_sanity_check — never try to enumerate distances manually for large stores
 - To resolve metro/regional radius overlaps use run_radius_conflict_check — never do it manually
