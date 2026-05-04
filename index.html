@@ -1372,76 +1372,140 @@ function runTierMatch(options={}){
     return true;
   });
 
+  if(!targetStores.length) return{report:[],action:null};
+
+  // Working sets for ALL eligible stores so stolen suburbs propagate to victims
+  const eligibleStores=stores.filter(s=>!s.removed&&(s.is_metro||s.territory_mode==='suburbs'));
+  const storeById={};
+  eligibleStores.forEach(s=>{storeById[s.id]=s;});
+  const workSet={};   // store.id → Set<sal_code>
+  const nameMap={};   // store.id → {sal_code→name}
+  eligibleStores.forEach(s=>{
+    workSet[s.id]=new Set(s.suburbs||[]);
+    nameMap[s.id]={};
+    (s.suburbs||[]).forEach((c,i)=>{nameMap[s.id][c]=(s.suburb_names||[])[i]||c;});
+  });
+
+  // Resolve existing conflicts upfront: for each SAL claimed by multiple stores,
+  // keep only the nearest claimant and remove from all others
+  const tempClaims={};
+  eligibleStores.forEach(s=>{
+    workSet[s.id].forEach(code=>{
+      if(!tempClaims[code]) tempClaims[code]=[];
+      const f=window.suburbFeatureMap&&window.suburbFeatureMap[code];
+      const ct=f&&f._center;
+      const d=ct?haversineKm(s.lat,s.lng,ct.lat,ct.lng):Infinity;
+      tempClaims[code].push({id:s.id,d});
+    });
+  });
+  const claimMap={};  // sal_code → store.id
+  Object.entries(tempClaims).forEach(([code,claims])=>{
+    claims.sort((a,b)=>a.d-b.d);
+    const winner=claims[0].id;
+    claimMap[code]=winner;
+    claims.slice(1).forEach(({id})=>{workSet[id].delete(code);delete nameMap[id][code];});
+  });
+
+  function subPop(code){return(salAudience[code]&&salAudience[code].pop)||0;}
+  function workPop(sid){let p=0;workSet[sid].forEach(c=>p+=subPop(c));return p;}
+
+  // Sort targetStores: overshoot first so they release suburbs before undershoot expands
+  const sorted=[...targetStores].sort((a,b)=>{
+    const {max:maxA}=calcTierTarget(a.meta_tier);
+    const {max:maxB}=calcTierTarget(b.meta_tier);
+    return (workPop(b.id)>maxB?1:0)-(workPop(a.id)>maxA?1:0);
+  });
+
   const report=[], batchUpdates=[];
 
-  targetStores.forEach(s=>{
-    const {pop:target,min,max}=calcTierTarget(s.meta_tier);
-    const currentPop=calcStoreAudience(s).pop;
+  sorted.forEach(s=>{
+    const {min,max}=calcTierTarget(s.meta_tier);
+    // Distance cap: metro 10 km, regional 50 km
+    const cap=s.is_metro?10:50;
+    let curPop=workPop(s.id);
 
-    if(currentPop>=min && currentPop<=max){
+    if(curPop>=min&&curPop<=max){
       report.push({store_id:s.id,store_name:s.name,tier:s.meta_tier,
-        current_pop:currentPop,target,status:'in_band'});
+        current_pop:curPop,status:'in_band'});
       return;
     }
 
-    let newCodes=[...(s.suburbs||[])];
-    let newNames=[...(s.suburb_names||[])];
+    const beforePop=curPop;
 
-    if(currentPop<min){
-      // Expand: add nearest unassigned suburbs until in band
-      const assigned=new Set(newCodes);
-      const metroOwned=s.is_metro?null:new Set();
-      if(metroOwned) stores.forEach(ms=>{ if(ms.is_metro&&!ms.removed)(ms.suburbs||[]).forEach(c=>metroOwned.add(c)); });
+    if(curPop>max){
+      // Contract: remove furthest suburbs first, never drop below min
+      const subList=[...workSet[s.id]].map(code=>{
+        const f=window.suburbFeatureMap&&window.suburbFeatureMap[code];
+        const c=f&&f._center;
+        return{code,d:c?haversineKm(s.lat,s.lng,c.lat,c.lng):0,pop:subPop(code)};
+      }).sort((a,b)=>b.d-a.d);
+
+      for(const sub of subList){
+        if(curPop<=max) break;
+        if(curPop-sub.pop>=min){
+          workSet[s.id].delete(sub.code);
+          delete nameMap[s.id][sub.code];
+          if(claimMap[sub.code]===s.id) delete claimMap[sub.code];
+          curPop-=sub.pop;
+        }
+      }
+      report.push({store_id:s.id,store_name:s.name,tier:s.meta_tier,
+        before_pop:beforePop,after_pop:curPop,min,max,
+        in_band:curPop>=min&&curPop<=max,action:'contracted'});
+
+    } else {
+      // Expand: nearest candidates first; steal from neighbor if we are strictly closer
       const candidates=[];
       (postcodeData&&postcodeData.features||[]).forEach(f=>{
         const code=f.properties.sal_code;
-        if(assigned.has(code)) return;
-        if(metroOwned&&metroOwned.has(code)) return;
+        if(workSet[s.id].has(code)) return;
         const c=f._center; if(!c) return;
-        if(!s.is_metro&&s.territory_mode==='suburbs'&&haversineKm(s.lat,s.lng,c.lat,c.lng)>(s.radius||0)) return;
-        const d=(s.lat-c.lat)**2+(s.lng-c.lng)**2;
-        candidates.push({code,name:f.properties.sal_name||code,d,
-          pop:(salAudience[code]&&salAudience[code].pop)||0});
+        const d=haversineKm(s.lat,s.lng,c.lat,c.lng);
+        if(d>cap) return;
+        candidates.push({code,name:f.properties.sal_name||code,d,lat:c.lat,lng:c.lng,pop:subPop(code)});
       });
       candidates.sort((a,b)=>a.d-b.d);
-      let running=currentPop;
+
       for(const sub of candidates){
-        if(running>=min) break;
-        newCodes.push(sub.code); newNames.push(sub.name);
-        running+=sub.pop;
+        if(curPop>=min) break;
+        const ownerId=claimMap[sub.code];
+        if(!ownerId){
+          // Unclaimed: take it
+          workSet[s.id].add(sub.code);
+          nameMap[s.id][sub.code]=sub.name;
+          claimMap[sub.code]=s.id;
+          curPop+=sub.pop;
+        } else if(ownerId!==s.id){
+          // Claimed: steal only if we are strictly closer than current owner
+          const owner=storeById[ownerId];
+          if(!owner) continue;
+          const ownerDist=haversineKm(owner.lat,owner.lng,sub.lat,sub.lng);
+          if(sub.d<ownerDist){
+            workSet[ownerId].delete(sub.code);
+            delete nameMap[ownerId][sub.code];
+            workSet[s.id].add(sub.code);
+            nameMap[s.id][sub.code]=sub.name;
+            claimMap[sub.code]=s.id;
+            curPop+=sub.pop;
+          }
+        }
       }
-      const finalPop=newCodes.reduce((a,c)=>a+((salAudience[c]&&salAudience[c].pop)||0),0);
       report.push({store_id:s.id,store_name:s.name,tier:s.meta_tier,
-        before_pop:currentPop,after_pop:finalPop,target,min,max,
-        in_band:finalPop>=min&&finalPop<=max,action:'expanded'});
-
-    } else {
-      // Contract: remove furthest suburbs until in band (won't go below min)
-      const withDist=newCodes.map((code,i)=>{
-        const f=window.suburbFeatureMap&&window.suburbFeatureMap[code];
-        const c=f&&f._center;
-        return {code,name:newNames[i]||code,
-          d:c?(s.lat-c.lat)**2+(s.lng-c.lng)**2:0,
-          pop:(salAudience[code]&&salAudience[code].pop)||0,keep:true};
-      });
-      withDist.sort((a,b)=>b.d-a.d);
-      let running=currentPop;
-      for(const sub of withDist){
-        if(running<=max) break;
-        if(running-sub.pop>=min){sub.keep=false; running-=sub.pop;}
-      }
-      const kept=withDist.filter(x=>x.keep);
-      const keptSet=new Set(kept.map(x=>x.code));
-      newCodes=newCodes.filter(c=>keptSet.has(c));
-      newNames=newCodes.map(c=>{const e=kept.find(x=>x.code===c);return e?e.name:c;});
-      const finalPop=newCodes.reduce((a,c)=>a+((salAudience[c]&&salAudience[c].pop)||0),0);
-      report.push({store_id:s.id,store_name:s.name,tier:s.meta_tier,
-        before_pop:currentPop,after_pop:finalPop,target,min,max,
-        in_band:finalPop>=min&&finalPop<=max,action:'contracted'});
+        before_pop:beforePop,after_pop:curPop,min,max,
+        in_band:curPop>=min&&curPop<=max,action:'expanded'});
     }
+  });
 
-    batchUpdates.push({store_id:s.id,
-      suburbs:newCodes.map((code,i)=>({code,name:newNames[i]||code}))});
+  // Emit batchUpdates for every eligible store whose suburbs changed (including steal victims)
+  eligibleStores.forEach(s=>{
+    const orig=new Set(s.suburbs||[]);
+    const ws=workSet[s.id];
+    const changed=[...ws].some(c=>!orig.has(c))||[...orig].some(c=>!ws.has(c));
+    if(changed){
+      const codes=[...ws];
+      batchUpdates.push({store_id:s.id,
+        suburbs:codes.map(code=>({code,name:nameMap[s.id][code]||code}))});
+    }
   });
 
   return{report,action:batchUpdates.length?
