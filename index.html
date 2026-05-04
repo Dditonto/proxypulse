@@ -1784,6 +1784,9 @@ Tier match — expand or contract a store's territory so its population lands wi
 <action>{"type":"run_tier_match","state":"VIC","reason":"Tier match all Victorian metro stores"}</action>
 <action>{"type":"run_tier_match","brand":"HH","reason":"Tier match all HH metro stores"}</action>
 
+Radius fallback — toggles overshoot regional stores to radius mode where the smallest available suburb exceeds tier max. Use when tier match leaves stores with extreme overshoot (>100% over tier max) due to large rural SAL granularity. Computes the smallest radius_km whose cumulative SAL population reaches the tier target and marks those stores in the CSV export:
+<action>{"type":"set_radius_fallback","reason":"Toggle extreme-overshoot rural stores to radius mode sized to tier target"}</action>
+
 Manual suburb edits (use for targeted changes after Voronoi):
 <action>{"type":"add_suburbs","store_id":42,"suburbs":[{"code":"20001","name":"Abbotsford"}],"reason":"..."}</action>
 <action>{"type":"remove_suburbs","store_id":42,"codes":["20001","20002"],"reason":"..."}</action>
